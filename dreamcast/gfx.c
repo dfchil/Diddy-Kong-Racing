@@ -1,6 +1,10 @@
 
 #include "gfx.h"
 
+#ifndef DKR_SHOW_FPS
+#define DKR_SHOW_FPS 1
+#endif
+
 #include <kos.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -68,16 +72,16 @@ static DcTexture sTextures[MAX_TEXTURES];
 
 static int sPvrReady;
 static int sFpsFont; // enDjinn's quick font is in video memory, for the frame rate
-static int sInScene;
+static DKR_HOT int sInScene;
 
 // N64 framebuffer size the game draws in, and how we stretch it to fill the DC
 // 640x480 output.
-static float sScaleX = 2.0f;
-static float sScaleY = 2.0f;
+static DKR_HOT float sScaleX = 2.0f;
+static DKR_HOT float sScaleY = 2.0f;
 
 // Current render state.
-static int sBoundTex;      // 1-based index into sTextures, 0 = untextured
-static int sFilterPoint;   // 1 = nearest, 0 = bilinear
+static DKR_HOT int sBoundTex;      // 1-based index into sTextures, 0 = untextured
+static DKR_HOT int sFilterPoint;   // 1 = nearest, 0 = bilinear
 // texenv "blend toward constant" (textured 2D: font glyphs, logos, menu
 // highlight). The RDP combiner is linear in the texel:
 //     result = unlit + texel * (lit - unlit)
@@ -86,24 +90,24 @@ static int sFilterPoint;   // 1 = nearest, 0 = bilinear
 // texel*argb + oargb (offset colour, post-modulate), so argb = lit - unlit,
 // oargb = unlit. The selection highlight lives in per-vertex `unlit`, riding in
 // oargb.
-static int sTexEnvBlend;
+static DKR_HOT int sTexEnvBlend;
 static unsigned char sBlendColor[4]; // `lit`
-static int sDepthTest = 1;
-static int sDepthWrite = 1;
-static int sDepthOffset;   // decal bias
-static float sAlphaRef;    // > 0 routes the batch to the punch-through list
-static int sBlend = 1;     // the RDP render mode blends (FORCE_BL): translucent
+static DKR_HOT int sDepthTest = 1;
+static DKR_HOT int sDepthWrite = 1;
+static DKR_HOT int sDepthOffset;   // decal bias
+static DKR_HOT float sAlphaRef;    // > 0 routes the batch to the punch-through list
+static DKR_HOT int sBlend = 1;     // the RDP render mode blends (FORCE_BL): translucent
 
 // Scissor, in N64 pixels (top-left origin). Full screen by default.
-static int sScisEnable;
+static DKR_HOT int sScisEnable;
 static float sScisX0, sScisY0, sScisX1, sScisY1;
 
 // Recompute-on-demand flags. The scissor needs one per list: the two lists are
 // built independently, so a clip consumed while recording PT would never reach TR.
-static int sHdrDirty = 1;
-static int sScisDirty = 1;
-static int sScisDirtyPt = 1;
-static int sScisDirtyOp = 1;
+static DKR_HOT int sHdrDirty = 1;
+static DKR_HOT int sScisDirty = 1;
+static DKR_HOT int sScisDirtyPt = 1;
+static DKR_HOT int sScisDirtyOp = 1;
 
 static pvr_poly_hdr_t sHdr __attribute__((aligned(32)));
 
@@ -125,24 +129,49 @@ static pvr_poly_hdr_t sHdr __attribute__((aligned(32)));
 #define PT_MAX_WORDS 4096
 
 static unsigned char sPtBuf[PT_MAX_WORDS][32] __attribute__((aligned(32)));
-static int sPtCount;
+static DKR_HOT int sPtCount;
 static int sPtOverflow;
 
 #define TR_MAX_WORDS 8192
 
 static unsigned char sTrBuf[TR_MAX_WORDS][32] __attribute__((aligned(32)));
-static int sTrCount;
+static DKR_HOT int sTrCount;
 static int sTrOverflow;
 
 // Display-list order matters only for draws without a depth test. Before the
 // first depth-tested batch they are the backdrop (screen fill, sky); after it
 // they are the overlay (HUD, text, fades).
-static int sSeenDepth;
+static DKR_HOT int sSeenDepth;
 // A blended backdrop batch is replayed after the opaque scene, so it is drawn at
 // this depth with a depth compare: just in front of the background plane
 // (FLT_EPSILON in KOS) and behind any real surface.
 #define BACKDROP_Z 1.0e-6f
-static int sFarBackdrop;
+static DKR_HOT int sFarBackdrop;
+// A cover: an opaque 2D surface over the whole scene, the screen transitions'
+// solid black (gfx_set_cover). Drawn in OP rather than TR, which saves a
+// blended full-screen fill, at a depth nearer than any of the scene, and
+// writing it, so what the PVR draws after OP (PT, TR) stays under it.
+//
+// The 2D drawn after the scene (HUD, text, the title screen's logo) goes to TR
+// and needs a place in that order: what the display list draws before a cover
+// lies under it, and what it draws after, over it. So 2D is drawn at a depth
+// above the whole scene, with a depth test: under a frame's k-th cover (k from
+// 0), COVER_Z + 2k; the cover itself at COVER_Z + 2k + 1. The scene's depth
+// (1/w, w at least 1) is at most 1.
+#define COVER_Z 16.0f
+static DKR_HOT int sCover;      // the display list is drawing a cover
+static DKR_HOT int sCoverDraw;  // the batch being emitted is one
+static DKR_HOT int sCoverDrawn; // a batch of the cover the display list is drawing went out
+static DKR_HOT int sCoverLayer; // covers finished this frame
+static DKR_HOT int sOverlayDraw; // the batch being emitted is 2D over the scene, in TR or PT
+
+static inline float cover_z(void) {
+    return COVER_Z + 2.0f * (float) sCoverLayer + 1.0f;
+}
+
+static inline float overlay_z(void) {
+    return COVER_Z + 2.0f * (float) sCoverLayer;
+}
 
 // VRAM freed while a scene is open. A recorded header holds a raw texture
 // pointer and isn't replayed until frame end, so freeing mid-frame lets the next
@@ -159,7 +188,7 @@ static int sPendingFreeCount;
 #define ROUTE_PT 1
 #define ROUTE_OP 2
 
-static int sRoute;
+static DKR_HOT int sRoute;
 
 // PVR punch-through alpha threshold: a texel with alpha below this is discarded
 // before the depth stage. KOS names the register's offset (PVR_PT_ALPHA_REF) but
@@ -193,7 +222,7 @@ static void ta_commit(void *p) {
 // Init / teardown
 // ---------------------------------------------------------------------------
 
-static void* pvr_ta_sq_addr;
+static DKR_HOT void* pvr_ta_sq_addr;
 
 void gfx_window_init(int width, int height, int scale) {
     pvr_init_params_t params = {
@@ -237,7 +266,7 @@ void gfx_window_init(int width, int height, int scale) {
         state->video.pvr_params = params;
         state->flags.soft_reset_enabled = 0;
         state->flags.no_snd_init = 1;
-        state->flags.no_input_init = 1;
+        state->flags.no_input_init = !DKR_ENJ_INPUT; // ENJ_INPUT=1: enDjinn reads the pads
         if (enj_state_startup() != 0) {
             return;
         }
@@ -618,7 +647,7 @@ void gfx_set_alpha_test(float ref) {
 }
 
 // Asked once or twice per batch, so it is worked out when the scissor changes.
-static int sScisExact;
+static DKR_HOT int sScisExact;
 static int scissor_compute_exact(void);
 
 static inline int scissor_needs_exact_clip(void) {
@@ -661,6 +690,10 @@ static void frame_state_reset(void) {
     sPtCount = 0;
     sTrCount = 0;
     sSeenDepth = 0;
+    sCover = 0;
+    sCoverDrawn = 0;
+    sCoverLayer = 0;
+    sOverlayDraw = 0;
     sRoute = ROUTE_OP;
 }
 
@@ -674,7 +707,7 @@ void gfx_frame_begin(void) {
 }
 
 // User clip is specified in 32-pixel tiles, lower-right inclusive.
-static void submit_user_clip(int x0, int y0, int x1, int y1) {
+static __attribute__((noinline, cold)) void submit_user_clip(int x0, int y0, int x1, int y1) {
     unsigned int *clip;
 
     if (x0 < 0) x0 = 0;
@@ -869,13 +902,14 @@ static void header_cache_clear(void) {
     }
 }
 
-static void compile_header_uncached(int list, pvr_poly_hdr_t *out);
+static __attribute__((noinline, cold)) void compile_header_uncached(int list, pvr_poly_hdr_t *out);
 
-static void compile_header_for(int list, pvr_poly_hdr_t *out) {
+static DKR_HOT_CODE void compile_header_for(int list, pvr_poly_hdr_t *out) {
     // Everything compile_header_uncached reads, and a top bit so no key is 0.
     unsigned int key = 0x80000000u | ((unsigned int) list << 20) | ((unsigned int) sBoundTex << 6) |
                        ((sFilterPoint != 0) << 5) | ((sScisEnable != 0) << 4) | ((sDepthTest != 0) << 3) |
-                       ((sFarBackdrop != 0) << 2) | ((sAlphaRef > 0.0f) << 1) | (sDepthWrite != 0);
+                       ((sFarBackdrop != 0) << 2) | ((sAlphaRef > 0.0f) << 1) | (sDepthWrite != 0) |
+                       ((unsigned int) (sCoverDraw != 0) << 30);
     unsigned int at = (key ^ (key >> 6) ^ (key >> 13)) & (HDR_CACHE - 1);
 
     if (sHdrCache[at].key != key) {
@@ -885,7 +919,8 @@ static void compile_header_for(int list, pvr_poly_hdr_t *out) {
     *out = sHdrCache[at].hdr;
 }
 
-static void compile_header_uncached(int list, pvr_poly_hdr_t *out) {
+// Only on a header-cache miss: out of the hot code.
+static __attribute__((noinline, cold)) void compile_header_uncached(int list, pvr_poly_hdr_t *out) {
     pvr_poly_cxt_t cxt;
 
     if (sBoundTex != 0 && sTextures[sBoundTex - 1].data != NULL) {
@@ -944,12 +979,40 @@ static void compile_header_uncached(int list, pvr_poly_hdr_t *out) {
         cxt.blend.dst = PVR_BLEND_INVSRCALPHA;
     }
 
+    if (sCoverDraw) {
+        cxt.depth.comparison = PVR_DEPTHCMP_ALWAYS;
+        cxt.depth.write = PVR_DEPTHWRITE_ENABLE;
+    } else if (list != PVR_LIST_OP_POLY && !sDepthTest && !sFarBackdrop) {
+        // 2D over the scene: under the covers the display list draws after it.
+        cxt.depth.comparison = PVR_DEPTHCMP_GEQUAL;
+        cxt.depth.write = PVR_DEPTHWRITE_DISABLE;
+    }
+
     pvr_poly_compile(out, &cxt);
 }
 
 /** The streamed list's header is cached across batches; the recorded ones compile per batch. */
 static void compile_header(void) {
     compile_header_for(PVR_LIST_OP_POLY, &sHdr);
+}
+
+int gDcFadeOn;
+unsigned char gDcFadeLut[256];
+
+void gfx_set_fade(int keep) {
+    int c;
+
+    if (keep >= 255) {
+        gDcFadeOn = 0;
+        return;
+    }
+    if (keep < 0) {
+        keep = 0;
+    }
+    for (c = 0; c < 256; c++) {
+        gDcFadeLut[c] = (unsigned char) ((c * keep + 127) / 255);
+    }
+    gDcFadeOn = 1;
 }
 
 static inline unsigned int pack_argb(unsigned char a, unsigned char r, unsigned char g, unsigned char b) {
@@ -968,7 +1031,15 @@ static void emit_vert(const GfxTriVert *s, int eol, float uScale, float vScale) 
     if (sFarBackdrop) {
         invw = BACKDROP_Z;
     }
+    if (sCoverDraw) {
+        invw = cover_z();
+    } else if (sOverlayDraw) {
+        invw = overlay_z();
+    }
 
+#if DKR_FILL_PROF
+    gfx_prof_fill_vert(s->x * sScaleX, s->y * sScaleY, eol);
+#endif
     v->flags = eol ? PVR_CMD_VERTEX_EOL : PVR_CMD_VERTEX;
     v->x = s->x * sScaleX;
     v->y = s->y * sScaleY;
@@ -987,14 +1058,371 @@ static void emit_vert(const GfxTriVert *s, int eol, float uScale, float vScale) 
         if (dr < 0) dr = 0;
         if (dg < 0) dg = 0;
         if (db < 0) db = 0;
-        v->argb = pack_argb(sBlendColor[3], (unsigned char) dr, (unsigned char) dg, (unsigned char) db);
-        v->oargb = ((unsigned int) s->r << 16) | ((unsigned int) s->g << 8) | (unsigned int) s->b;
+        v->argb = gfx_fade_argb(pack_argb(sBlendColor[3], (unsigned char) dr, (unsigned char) dg, (unsigned char) db));
+        v->oargb = gfx_fade_argb(((unsigned int) s->r << 16) | ((unsigned int) s->g << 8) | (unsigned int) s->b);
     } else {
-        v->argb = pack_argb(s->a, s->r, s->g, s->b);
+        v->argb = gfx_fade_argb(pack_argb(s->a, s->r, s->g, s->b));
         v->oargb = 0;
     }
     ta_commit(v);
 }
+
+// ---------------------------------------------------------------------------
+// Fill profile (FILL_PROF=1, with GFX_PROFILE): what each list draws, by the
+// display list's category, in screen-space area (pixels of the render target,
+// so 1280 wide with FSAA) and in tiles touched (32x32 tiles under each
+// triangle's bounding box, about what the tile binner hands the ISP). The
+// translucent list is also split by what its batches look like, the classes
+// of sTrStats plus the backdrop and the 2D overlay. Profile builds only: the
+// area of every triangle costs CPU time, not PVR time.
+//
+// PROF_SKIP drops part of the frame, to measure what it costs the PVR:
+//   1 the punch-through list, 2 the translucent list (the frame rate readout
+//   stays), 100 + c category c in every list, 200 + c category c in the
+//   translucent list only, 300 + k translucent class k (FILL_TR_*), 400 + c
+//   category c in the opaque list only.
+// ---------------------------------------------------------------------------
+#ifndef DKR_FILL_PROF
+#define DKR_FILL_PROF 0
+#endif
+#ifndef DKR_PROF_SKIP
+#define DKR_PROF_SKIP 0
+#endif
+
+enum { FILL_TR_BACKDROP, FILL_TR_OPAQUE_Z, FILL_TR_OPAQUE_NOZ, FILL_TR_CUTOUT, FILL_TR_XLU, FILL_TR_OVERLAY,
+       FILL_TR_KINDS };
+#define FILL_CATS 9 // PC_PROF_CAT_COUNT (dreamcast/prof.h)
+
+static int sProfCat;     // the display list's current category
+static int sFillTrKind;  // class of the batch being recorded to TR
+
+/** The category main.c's walk is in (scene_category). */
+void gfx_prof_set_category(int cat) {
+    sProfCat = (cat >= 0 && cat < FILL_CATS) ? cat : 0;
+}
+
+/** The TR class of the current state, as gfx_blast_begin's stats count it. */
+static __attribute__((unused)) int fill_tr_kind(int emitAlpha, int farBackdrop) {
+    int opaque = emitAlpha == 0xFF && (sBoundTex == 0 || sTextures[sBoundTex - 1].opaque);
+    int cutout = emitAlpha == 0xFF && sBoundTex != 0 && sTextures[sBoundTex - 1].cutout;
+
+    if (!sDepthTest) {
+        return farBackdrop ? FILL_TR_BACKDROP : FILL_TR_OVERLAY;
+    }
+    return opaque ? (sDepthWrite ? FILL_TR_OPAQUE_Z : FILL_TR_OPAQUE_NOZ) : cutout ? FILL_TR_CUTOUT : FILL_TR_XLU;
+}
+
+/** Whether PROF_SKIP drops a batch going to `route`, of TR class `kind`. */
+static int sProfSkip = DKR_PROF_SKIP == 999 ? 0 : DKR_PROF_SKIP;
+
+/** PROF_SKIP=999: main.c switches between the codes every few frames, so one run measures them all. */
+void gfx_prof_set_skip(int code) {
+    sProfSkip = code;
+}
+
+static __attribute__((unused)) int prof_skip(int route, int kind) {
+    if (sProfSkip >= 400) {
+        return route == ROUTE_OP && sProfCat == sProfSkip - 400;
+    }
+    if (sProfSkip >= 300) {
+        return route == ROUTE_TR && kind == sProfSkip - 300;
+    }
+    if (sProfSkip >= 200) {
+        return route == ROUTE_TR && sProfCat == sProfSkip - 200;
+    }
+    if (sProfSkip >= 100) {
+        return sProfCat == sProfSkip - 100;
+    }
+    return 0;
+}
+
+#if DKR_FILL_PROF
+typedef struct {
+    unsigned int tris;
+    float area;  // pixels
+    float tiles; // tile visits
+} FillSum;
+
+static FillSum sFill[3][FILL_CATS];  // [route][category]
+static FillSum sFillTr[FILL_TR_KINDS];
+static unsigned int sFillFrames;
+static int sFillRoute; // the list the vertices being emitted go to
+static float sFillX[2], sFillY[2];
+static int sFillN;
+static int sFillOn;
+
+// Per frame, for fitting render time to what was drawn (FF lines in the
+// report): the PVR render time, then per list area, tiles and triangles, then
+// TR area by class and by category.
+#define FF_COLS (1 + 9 + FILL_TR_KINDS + FILL_CATS)
+#define FF_FRAMES 2048
+static float sFrameFill[FF_COLS];
+static float sFF[FF_FRAMES][FF_COLS];
+static int sFFCount;
+
+// The heaviest recorded batches, by what they draw: list, category, class
+// and texture, so the report can say which surfaces fill the frame.
+#define FILL_TOP 256
+static struct {
+    unsigned int key; // 0 = empty
+    unsigned int tris;
+    float area;
+    int texW, texH, texFormat, depthWrite;
+} sFillTop[FILL_TOP];
+static int sFillTopFull;
+
+static void fill_top_add(float area) {
+    unsigned int key = 0x80000000u | ((unsigned int) sFillRoute << 24) | ((unsigned int) sProfCat << 20) |
+                       ((unsigned int) sFillTrKind << 16) | (unsigned int) sBoundTex;
+    int i;
+
+    for (i = 0; i < FILL_TOP; i++) {
+        if (sFillTop[i].key == key) {
+            break;
+        }
+        if (sFillTop[i].key == 0) {
+            DcTexture *t = (sBoundTex != 0) ? &sTextures[sBoundTex - 1] : NULL;
+
+            sFillTop[i].key = key;
+            sFillTop[i].texW = t ? t->w : 0;
+            sFillTop[i].texH = t ? t->h : 0;
+            sFillTop[i].texFormat = t ? (t->format >> 27) & 7 : -1;
+            sFillTop[i].depthWrite = sDepthWrite;
+            break;
+        }
+    }
+    if (i == FILL_TOP) {
+        sFillTopFull++;
+        return;
+    }
+    sFillTop[i].tris++;
+    sFillTop[i].area += area;
+}
+
+/** Area of a triangle clipped to the render target. */
+static float fill_clipped_area(const float *x, const float *y) {
+    float ax[CLIP_MAX_VERTS], ay[CLIP_MAX_VERTS], bx[CLIP_MAX_VERTS], by[CLIP_MAX_VERTS];
+    float *ix = ax, *iy = ay, *ox = bx, *oy = by;
+    int n = 3, plane, i;
+    float area = 0.0f;
+
+    for (i = 0; i < 3; i++) {
+        ax[i] = x[i];
+        ay[i] = y[i];
+    }
+    for (plane = 0; plane < 4 && n >= 3; plane++) {
+        int axis = plane >> 1;
+        float bound = (plane & 1) ? (axis ? (float) DC_SCREEN_H : (float) DC_RENDER_W) : 0.0f;
+        int m = 0;
+
+        for (i = 0; i < n; i++) {
+            int j = (i + 1) % n;
+            float ca = axis ? iy[i] : ix[i], cb = axis ? iy[j] : ix[j];
+            int ina = (plane & 1) ? ca <= bound : ca >= bound;
+            int inb = (plane & 1) ? cb <= bound : cb >= bound;
+
+            if (ina) {
+                ox[m] = ix[i];
+                oy[m] = iy[i];
+                m++;
+            }
+            if (ina != inb && m < CLIP_MAX_VERTS) {
+                float s = (bound - ca) / (cb - ca);
+
+                ox[m] = ix[i] + s * (ix[j] - ix[i]);
+                oy[m] = iy[i] + s * (iy[j] - iy[i]);
+                m++;
+            }
+        }
+        n = m;
+        {
+            float *t;
+
+            t = ix; ix = ox; ox = t;
+            t = iy; iy = oy; oy = t;
+        }
+    }
+    for (i = 0; n >= 3 && i < n; i++) {
+        int j = (i + 1) % n;
+
+        area += ix[i] * iy[j] - ix[j] * iy[i];
+    }
+    return area < 0.0f ? -area * 0.5f : area * 0.5f;
+}
+
+/** One vertex of a strip in framebuffer pixels, as it goes out. */
+void gfx_prof_fill_vert(float x, float y, int eol) {
+    if (!sFillOn) {
+        return;
+    }
+    if (sFillN >= 2) {
+        float tx[3] = { sFillX[0], sFillX[1], x }, ty[3] = { sFillY[0], sFillY[1], y };
+        float x0 = tx[0], x1 = tx[0], y0 = ty[0], y1 = ty[0];
+        float area = fill_clipped_area(tx, ty);
+        int i;
+
+        for (i = 1; i < 3; i++) {
+            if (tx[i] < x0) x0 = tx[i];
+            if (tx[i] > x1) x1 = tx[i];
+            if (ty[i] < y0) y0 = ty[i];
+            if (ty[i] > y1) y1 = ty[i];
+        }
+        if (x0 < 0.0f) x0 = 0.0f;
+        if (y0 < 0.0f) y0 = 0.0f;
+        if (x1 > (float) DC_RENDER_W - 1.0f) x1 = (float) DC_RENDER_W - 1.0f;
+        if (y1 > (float) DC_SCREEN_H - 1.0f) y1 = (float) DC_SCREEN_H - 1.0f;
+        if (x1 >= x0 && y1 >= y0) {
+            FillSum *f = &sFill[sFillRoute][sProfCat];
+            float tiles = (float) ((((int) x1 >> 5) - ((int) x0 >> 5) + 1) * (((int) y1 >> 5) - ((int) y0 >> 5) + 1));
+
+            f->tris++;
+            f->area += area;
+            f->tiles += tiles;
+            sFrameFill[1 + 3 * (2 - sFillRoute)] += area;
+            sFrameFill[2 + 3 * (2 - sFillRoute)] += tiles;
+            sFrameFill[3 + 3 * (2 - sFillRoute)] += 1.0f;
+            if (sFillRoute == ROUTE_TR) {
+                sFrameFill[10 + sFillTrKind] += area;
+                sFrameFill[10 + FILL_TR_KINDS + sProfCat] += area;
+            }
+            if (sFillRoute != ROUTE_OP) {
+                fill_top_add(area);
+            }
+            if (sFillRoute == ROUTE_TR) {
+                sFillTr[sFillTrKind].tris++;
+                sFillTr[sFillTrKind].area += area;
+                sFillTr[sFillTrKind].tiles += tiles;
+            }
+        }
+        sFillX[0] = sFillX[1];
+        sFillY[0] = sFillY[1];
+        sFillX[1] = x;
+        sFillY[1] = y;
+    } else {
+        sFillX[sFillN] = x;
+        sFillY[sFillN] = y;
+        sFillN++;
+    }
+    if (eol) {
+        sFillN = 0;
+    }
+}
+
+static void fill_route(int route) {
+    sFillRoute = route;
+    sFillN = 0;
+}
+
+/** Per-scene report: per frame, by list and category, then TR by class. */
+void gfx_fill_report(void) {
+    static const char *const lists[3] = { "TR", "PT", "OP" };
+    static const char *const cats[FILL_CATS] = { "other", "level", "objects", "level-tr", "water",
+                                                 "particles", "hud", "racers", "shadows" };
+    static const char *const kinds[FILL_TR_KINDS] = { "backdrop", "opaque-z", "opaque-noz", "cutout", "xlu",
+                                                      "overlay" };
+    unsigned int n = sFillFrames ? sFillFrames : 1;
+    float screen = (float) DC_RENDER_W * (float) DC_SCREEN_H;
+    int l, c;
+
+    if (sFillFrames == 0) {
+        return;
+    }
+    for (l = 2; l >= 0; l--) {
+        printf("SCENE FILL %s per frame (tris, screens of area, tiles):", lists[l]);
+        for (c = 0; c < FILL_CATS; c++) {
+            if (sFill[l][c].tris != 0) {
+                printf(" %s %u %d.%02d %u", cats[c], sFill[l][c].tris / n,
+                       (int) (sFill[l][c].area / screen / (float) n),
+                       ((int) (sFill[l][c].area * 100.0f / screen / (float) n)) % 100,
+                       (unsigned int) (sFill[l][c].tiles / (float) n));
+            }
+        }
+        printf("\n");
+    }
+    printf("SCENE FILL TR by class:");
+    for (c = 0; c < FILL_TR_KINDS; c++) {
+        if (sFillTr[c].tris != 0) {
+            printf(" %s %u %d.%02d %u", kinds[c], sFillTr[c].tris / n, (int) (sFillTr[c].area / screen / (float) n),
+                   ((int) (sFillTr[c].area * 100.0f / screen / (float) n)) % 100,
+                   (unsigned int) (sFillTr[c].tiles / (float) n));
+        }
+    }
+    printf("\n");
+    for (l = 0; l < 12; l++) {
+        int best = -1;
+
+        for (c = 0; c < FILL_TOP; c++) {
+            if (sFillTop[c].key != 0 && sFillTop[c].area > 0.0f &&
+                (best < 0 || sFillTop[c].area > sFillTop[best].area)) {
+                best = c;
+            }
+        }
+        if (best < 0) {
+            break;
+        }
+        printf("SCENE FILL TOP %s %s %s tex %d %dx%d fmt %d zw %d: %u tris %d.%02d screens\n",
+               lists[(sFillTop[best].key >> 24) & 3], cats[(sFillTop[best].key >> 20) & 15],
+               kinds[(sFillTop[best].key >> 16) & 7], (int) (sFillTop[best].key & 0xFFFF), sFillTop[best].texW,
+               sFillTop[best].texH, sFillTop[best].texFormat, sFillTop[best].depthWrite, sFillTop[best].tris / n,
+               (int) (sFillTop[best].area / screen / (float) n),
+               ((int) (sFillTop[best].area * 100.0f / screen / (float) n)) % 100);
+        sFillTop[best].area = 0.0f;
+    }
+    if (sFillTopFull) {
+        printf("SCENE FILL TOP table full: %d triangles not listed\n", sFillTopFull);
+    }
+    memset(sFillTop, 0, sizeof(sFillTop));
+    sFillTopFull = 0;
+    // Columns: render us, OP area tiles tris, PT area tiles tris, TR area
+    // tiles tris (area in pixels), TR area by class, TR area by category.
+    for (l = 0; l < sFFCount; l++) {
+        printf("FF");
+        for (c = 0; c < FF_COLS; c++) {
+            printf(" %d", (int) sFF[l][c]);
+        }
+        printf("\n");
+    }
+    sFFCount = 0;
+    memset(sFill, 0, sizeof(sFill));
+    memset(sFillTr, 0, sizeof(sFillTr));
+    sFillFrames = 0;
+}
+
+/** At the start of each frame's walk: whether the scene is running, so the frame counts. */
+void gfx_fill_frame(int counted) {
+    // Frames PROF_SKIP=999 leaves something out of would undercount.
+    sFillOn = counted && sProfSkip == 0;
+    sFillFrames += sFillOn != 0;
+    memset(sFrameFill, 0, sizeof(sFrameFill));
+}
+
+/**
+ * After a frame is submitted: that frame's fill, with the last render time the
+ * PVR reported (a frame or two older; the fit lines them up).
+ */
+void gfx_fill_frame_done(unsigned int renderUs) {
+    if (sFillOn && sFFCount < FF_FRAMES) {
+        memcpy(sFF[sFFCount], sFrameFill, sizeof(sFrameFill));
+        sFF[sFFCount][0] = (float) renderUs;
+        sFFCount++;
+    }
+}
+#else
+#define fill_route(route) ((void) 0)
+void gfx_prof_fill_vert(float x, float y, int eol) {
+    (void) x;
+    (void) y;
+    (void) eol;
+}
+void gfx_fill_report(void) {
+}
+void gfx_fill_frame(int counted) {
+    (void) counted;
+}
+void gfx_fill_frame_done(unsigned int renderUs) {
+    (void) renderUs;
+}
+#endif
 
 void gfx_draw_tris(const GfxTriVert *verts, int count) {
     GfxTriVert poly[CLIP_MAX_VERTS];
@@ -1030,20 +1458,46 @@ void gfx_draw_tris(const GfxTriVert *verts, int count) {
         int emitAlpha = sTexEnvBlend ? sBlendColor[3] : verts[0].a;
 
         sFarBackdrop = 0;
+        sOverlayDraw = 0;
         if (USE_PT_LIST && sAlphaRef > 0.0f) {
             sRoute = ROUTE_PT;
+            sOverlayDraw = !sDepthTest; // alpha-tested 2D, drawn after OP like TR
         } else if (sDepthTest) {
             sRoute = sBlend ? ROUTE_TR : ROUTE_OP;
         } else if (!sSeenDepth && sTrCount == 0 && sPtCount == 0 && emitAlpha == 0xFF &&
                    (sBoundTex == 0 || sTextures[sBoundTex - 1].opaque)) {
             sRoute = ROUTE_OP;
+        } else if (sCover && emitAlpha == 0xFF && sBoundTex == 0) {
+            sRoute = ROUTE_OP;
+            sCoverDraw = 1;
+            sCoverDrawn = 1;
+            sHdrDirty = 1;
         } else {
             sRoute = ROUTE_TR;
             sFarBackdrop = !sSeenDepth;
+            sOverlayDraw = sSeenDepth;
         }
         if (sDepthTest) {
             sSeenDepth = 1;
         }
+#if DKR_FILL_PROF || DKR_PROF_SKIP
+        {
+            int kind = (sRoute == ROUTE_TR) ? fill_tr_kind(emitAlpha, sFarBackdrop) : 0;
+
+            if (prof_skip(sRoute, kind)) {
+                sRoute = ROUTE_OP;
+                sFarBackdrop = 0;
+                sOverlayDraw = 0;
+                if (sCoverDraw) {
+                    sCoverDraw = 0;
+                    sHdrDirty = 1;
+                }
+                return;
+            }
+            sFillTrKind = kind;
+            fill_route(sRoute);
+        }
+#endif
     }
 
     // Only the recorded lists reserve space up front, and clipping changes the
@@ -1073,6 +1527,7 @@ void gfx_draw_tris(const GfxTriVert *verts, int count) {
             }
             sRoute = ROUTE_OP;
             sFarBackdrop = 0;
+            sOverlayDraw = 0;
             return;
         }
     } else if (sRoute == ROUTE_TR) {
@@ -1085,6 +1540,7 @@ void gfx_draw_tris(const GfxTriVert *verts, int count) {
             }
             sRoute = ROUTE_OP;
             sFarBackdrop = 0;
+            sOverlayDraw = 0;
             return;
         }
     }
@@ -1152,6 +1608,19 @@ void gfx_draw_tris(const GfxTriVert *verts, int count) {
 
     sRoute = ROUTE_OP;
     sFarBackdrop = 0;
+    sOverlayDraw = 0;
+    if (sCoverDraw) {
+        sCoverDraw = 0;
+        sHdrDirty = 1;
+    }
+}
+
+void gfx_set_cover(int enable) {
+    if (!enable && sCover && sCoverDrawn) {
+        sCoverLayer++; // 2D drawn from here on goes over it
+    }
+    sCover = enable;
+    sCoverDrawn = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -1185,10 +1654,11 @@ int gfx_blast_why(void) {
 }
 
 int gfx_blast_viable(void) {
-    return sInScene && !sTexEnvBlend && !(sAlphaRef > 0.0f && !USE_PT_LIST) && !scissor_needs_exact_clip();
+    return sInScene && !sTexEnvBlend && !(sAlphaRef > 0.0f && !USE_PT_LIST) && !scissor_needs_exact_clip() &&
+           !sCover;
 }
 
-static int sBlastRoute; // the list the open blast batch is recorded to, or ROUTE_OP
+static DKR_HOT int sBlastRoute; // the list the open blast batch is recorded to, or ROUTE_OP
 
 // Profile only: what the fast path sends to the blended list, in batches and
 // reserved words, by whether it needed to blend. Classes: 0 no depth test (2D,
@@ -1221,7 +1691,7 @@ void gfx_tr_stats(unsigned int out[10]) {
     }
 }
 
-int gfx_blast_begin(float *uScale, float *vScale, float *scaleX, float *scaleY, int maxWords,
+DKR_HOT_CODE int gfx_blast_begin(float *uScale, float *vScale, float *scaleX, float *scaleY, int maxWords,
                     void **record, int emitAlpha, float *zMul, float *zAdd) {
     int route;
     int farBackdrop = 0;
@@ -1242,18 +1712,32 @@ int gfx_blast_begin(float *uScale, float *vScale, float *scaleX, float *scaleY, 
         route = ROUTE_TR;
         farBackdrop = !sSeenDepth;
     }
+#if DKR_GFX_PROFILE
     if (!sDepthTest && !(USE_PT_LIST && sAlphaRef > 0.0f)) {
         int opaque = emitAlpha == 0xFF && (sBoundTex == 0 || sTextures[sBoundTex - 1].opaque);
 
         sNoDepthStats[route == ROUTE_OP ? 0 : sSeenDepth ? 1 : (sTrCount || sPtCount) ? 2 : !opaque ? 3 : 0] +=
             (unsigned int) maxWords;
     }
+#endif
+#if DKR_FILL_PROF || DKR_PROF_SKIP
+    {
+        int kind = (route == ROUTE_TR) ? fill_tr_kind(emitAlpha, farBackdrop) : 0;
+
+        if (prof_skip(route, kind)) {
+            return 0; // gfx_draw_tris drops it
+        }
+        sFillTrKind = kind;
+        fill_route(route);
+    }
+#endif
     if (route == ROUTE_PT && sPtCount + maxWords + 2 > PT_MAX_WORDS) {
         return 0; // gfx_draw_tris reports the overflow
     }
     if (route == ROUTE_TR && sTrCount + maxWords + 2 > TR_MAX_WORDS) {
         return 0;
     }
+#if DKR_GFX_PROFILE
     if (route == ROUTE_TR) {
         int opaque = emitAlpha == 0xFF && (sBoundTex == 0 || sTextures[sBoundTex - 1].opaque);
         int cutout = emitAlpha == 0xFF && sBoundTex != 0 && sTextures[sBoundTex - 1].cutout;
@@ -1262,14 +1746,21 @@ int gfx_blast_begin(float *uScale, float *vScale, float *scaleX, float *scaleY, 
         sTrStats[kind]++;
         sTrStats[5 + kind] += (unsigned int) maxWords;
     }
+#endif
     if (sDepthTest) {
         sSeenDepth = 1;
     }
 
     // Depth as emit_vert sets it: decals sit a touch nearer, and a backdrop
     // drawn after the scene's first depth-tested batch goes to the far plane.
-    *zMul = farBackdrop ? 0.0f : (sDepthOffset ? 1.003f : 1.0f);
-    *zAdd = farBackdrop ? BACKDROP_Z : 0.0f;
+    // 2D over the scene goes at its layer among the frame's covers.
+    if (route != ROUTE_OP && !sDepthTest && !farBackdrop) {
+        *zMul = 0.0f;
+        *zAdd = overlay_z();
+    } else {
+        *zMul = farBackdrop ? 0.0f : (sDepthOffset ? 1.003f : 1.0f);
+        *zAdd = farBackdrop ? BACKDROP_Z : 0.0f;
+    }
 
     *record = NULL;
     sBlastRoute = route;
@@ -1292,6 +1783,7 @@ int gfx_blast_begin(float *uScale, float *vScale, float *scaleX, float *scaleY, 
         compile_header_for((route == ROUTE_PT) ? PVR_LIST_PT_POLY : PVR_LIST_TR_POLY, hdr);
         ta_commit(hdr);
         sFarBackdrop = 0;
+        sOverlayDraw = 0;
         *record = (route == ROUTE_PT) ? sPtBuf[sPtCount] : sTrBuf[sTrCount];
         sRoute = ROUTE_OP;
     } else {
@@ -1322,6 +1814,72 @@ int gfx_blast_begin(float *uScale, float *vScale, float *scaleX, float *scaleY, 
     // cross-file call per vertex.
     *scaleX = sScaleX;
     *scaleY = sScaleY;
+    return 1;
+}
+
+/**
+ * Appends a polygon header (when hdr is not NULL) and vertices to the
+ * translucent recording, in display-list order. Vertex x/y arrive in N64
+ * pixels and are scaled to the framebuffer here. 0 if there is no room.
+ */
+int gfx_tr_native(const pvr_poly_hdr_t *hdr, const pvr_vertex_t *verts, int count) {
+    int i;
+
+    if (!sInScene || sTrCount + count + (hdr ? 1 : 0) > TR_MAX_WORDS) {
+        return 0;
+    }
+    if (hdr) {
+        memcpy(sTrBuf[sTrCount++], hdr, sizeof(*hdr));
+    }
+    sFillTrKind = FILL_TR_OVERLAY;
+    fill_route(ROUTE_TR);
+    for (i = 0; i < count; i++) {
+        pvr_vertex_t *v = (pvr_vertex_t *) sTrBuf[sTrCount++];
+
+        *v = verts[i];
+        v->x *= sScaleX;
+        v->y *= sScaleY;
+        v->argb = gfx_fade_argb(v->argb);
+        v->oargb = gfx_fade_argb(v->oargb);
+#if DKR_FILL_PROF
+        gfx_prof_fill_vert(v->x, v->y, verts[i].flags == PVR_CMD_VERTEX_EOL);
+#endif
+    }
+    return 1;
+}
+
+/**
+ * Streams a native polygon into the opaque list, which is open while the
+ * display list is walked (dreamcast/swirl.c). Every batch sends its own header,
+ * so the next one restores the list's state.
+ */
+int gfx_op_native(const pvr_poly_hdr_t *hdr, const pvr_vertex_t *verts, int count) {
+    int i;
+
+    if (!sInScene) {
+        return 0;
+    }
+    if (hdr) {
+        shz_sq_memcpy32_1(pvr_ta_sq_addr, hdr);
+    }
+    fill_route(ROUTE_OP);
+    for (i = 0; i < count; i++) {
+#if DKR_FILL_PROF
+        gfx_prof_fill_vert(verts[i].x * sScaleX, verts[i].y * sScaleY, verts[i].flags == PVR_CMD_VERTEX_EOL);
+#endif
+        // Store-queue memory is write-only: nothing is read back from v.
+        pvr_vertex_t *v = (pvr_vertex_t *) pvr_dr_target(sDrState);
+
+        v->flags = verts[i].flags;
+        v->x = verts[i].x * sScaleX;
+        v->y = verts[i].y * sScaleY;
+        v->z = verts[i].z;
+        v->u = verts[i].u;
+        v->v = verts[i].v;
+        v->argb = gfx_fade_argb(verts[i].argb);
+        v->oargb = gfx_fade_argb(verts[i].oargb);
+        pvr_dr_commit(v);
+    }
     return 1;
 }
 
@@ -1383,13 +1941,18 @@ static void fps_tick(void) {
     }
     sLastFrameUs = now;
  
+#if DKR_GFX_PROFILE
     {
+        // In the profile's log (main.c): a printf over dcload mid-scene costs
+        // a round trip to the host, enough to make a frame late.
+        extern void pc_prof_log(const char *format, ...);
         static unsigned int frames = 0;
 
         if ((++frames % 120u) == 0u) {
-            printf("fps: %d.%d\n", (int) sFps, ((int) (sFps * 10.0f)) % 10);
+            pc_prof_log("fps: %d.%d\n", (int) sFps, ((int) (sFps * 10.0f)) % 10);
         }
     }
+#endif
 }
 
 /** The frame rate in the top-right corner, white over a black shadow. */
@@ -1424,8 +1987,8 @@ void gfx_frame_end(void) {
 
     // Neither PT nor TR was opened this frame, so opening them now is legal — the
     // rule is that a list cannot be opened *again*, not that lists must go in order.
-    replay_list(PVR_LIST_PT_POLY, sPtBuf, sPtCount, sFpsFont ? fps_draw : NULL);
-    replay_list(PVR_LIST_TR_POLY, sTrBuf, sTrCount, NULL);
+    replay_list(PVR_LIST_PT_POLY, sPtBuf, sProfSkip == 1 ? 0 : sPtCount, DKR_SHOW_FPS && sFpsFont ? fps_draw : NULL);
+    replay_list(PVR_LIST_TR_POLY, sTrBuf, sProfSkip == 2 ? 0 : sTrCount, NULL);
 
     pvr_scene_finish();
     frame_done();
@@ -1453,7 +2016,7 @@ static void frame_tr(void *data) {
 static void frame_pt(void *data) {
     (void) data;
     replay_words(sPtBuf, sPtCount);
-    if (sFpsFont) {
+    if (DKR_SHOW_FPS && sFpsFont) {
         fps_draw();
     }
 }

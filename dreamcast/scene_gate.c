@@ -2,6 +2,8 @@
 #include "scene_gate.h"
 
 #include <arch/timer.h>
+#include <malloc.h>
+#include <stdio.h>
 
 extern void pc_retrace_reset(void);
 extern void frame_interp_reset(void);
@@ -12,8 +14,10 @@ extern void dkr_afx_scene_hold(int held);
 extern void pc_texture_load_report(unsigned int sceneMs);
 extern void pc_texture_scene_load(int level);
 extern void pc_model_scene_release(void);
+extern int pc_textures_release_held(void);
 extern void pc_model_scene_load(int level);
 extern void pc_song_scene_load(int level);
+extern void pc_asset_scene_load(int level);
 #if DKR_GFX_PROFILE
 extern void pc_scene_prof_report(void);
 #endif
@@ -23,18 +27,32 @@ static volatile int sAwaitingStep;  // loaded, but its first logic step has not 
 static volatile int sAwaitingFrame; // stepped, but its first frame is not on screen yet
 static int sOpeningFrame;            // the frame that opened the gate, until the profile asks
 static int sSceneLevel = -1;
+static unsigned int sSceneVisit;
 static unsigned long long sLoadStarted;
 
 void pc_scene_loading(int level) {
 #if DKR_GFX_PROFILE
     pc_scene_prof_report(); // the scene that is ending
+    {
+        // How much of the heap the ending scene left in use, for sizing what
+        // the next one may hold.
+        struct mallinfo heap = mallinfo();
+
+        printf("SCENE HEAP arena %lu KB, in use %lu KB, free %lu KB\n", (unsigned long) (heap.arena / 1024),
+               (unsigned long) (heap.uordblks / 1024), (unsigned long) (heap.fordblks / 1024));
+    }
 #endif
     sSceneReady = 0;
     sAwaitingStep = sAwaitingFrame = 0;
     sLoadStarted = timer_ms_gettime64();
     sSceneLevel = level;
-    // The previous scene's held models go first, so the new level has the room.
+    sSceneVisit++;
+    // The previous scene's held models, sprites and textures go first, so the
+    // new level has the room.
+    pc_textures_release_held();
     pc_model_scene_release();
+    // The scene's pack of asset data, in one read, before the level loads.
+    pc_asset_scene_load(level);
     // The scene's textures first, in one pass, before the game asks for any.
     pc_texture_scene_load(level);
 #ifdef DKR_AICAFLOW
@@ -87,6 +105,14 @@ int pc_scene_take_opening_frame(void) {
 
     sOpeningFrame = 0;
     return opening;
+}
+
+int pc_scene_level(void) {
+    return sSceneLevel;
+}
+
+unsigned int pc_scene_visit(void) {
+    return sSceneVisit;
 }
 
 int pc_scene_is_ready(void) {

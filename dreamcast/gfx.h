@@ -1,6 +1,30 @@
 #ifndef LINUX_GFX_H
 #define LINUX_GFX_H
 
+// The state every batch reads, in the display-list walk (main.c) and here, is
+// some sixty small variables. Left to the linker they land in as many cache
+// lines, scattered among the big tables, and the operand cache is small and
+// direct-mapped: the vertex and recording traffic of a batch evicts them, and
+// the next batch misses on each one again. Marked with this they share one
+// section, a handful of lines.
+#define DKR_HOT __attribute__((section(".data.dkr_hot")))
+// The same for the code a batch runs through. The instruction cache is 8 KB
+// and direct-mapped too, and the walk's handlers, left where the linker puts
+// them, overlapped in it: batch after batch they evicted each other, and any
+// unrelated change that moved them made the frame faster or slower. KOS's
+// linker script gives .sub0 an address aligned to the cache size and fails
+// the link if it outgrows one cache's worth, so the hot handlers sit at a fixed
+// place in the cache and never on top of each other. Their cold paths are
+// split out of them to keep it that way.
+#if (defined(DKR_GFX_PROFILE) && DKR_GFX_PROFILE == 2) || (defined(DKR_FILL_PROF) && DKR_FILL_PROF)
+// The per-handler timers, and the fill profile's per-vertex calls, do not fit
+// in one cache's worth; they disturb the timing anyway. Kept together all the
+// same.
+#define DKR_HOT_CODE __attribute__((section(".text.dkr_hot")))
+#else
+#define DKR_HOT_CODE __attribute__((section(".sub0.dkr_hot")))
+#endif
+
 // Host graphics layer (linux/gfx.c) — SDL2 + OpenGL.
 //
 // Its own translation unit, plain C types only: SDL's headers pull in the
@@ -83,6 +107,42 @@ void gfx_blast_end(void *recordEnd);
 // TA words recorded so far this frame for the punch-through and translucent
 // lists (32 bytes each; a triangle is three). For the frame profile.
 void gfx_recorded_words(int *pt, int *tr);
+
+// A native polygon in the translucent list, at this point of the display list
+// (dreamcast/scrawl.c). Vertex x/y are N64 pixels. 0 if the recording is full.
+#include <dc/pvr.h>
+int gfx_tr_native(const pvr_poly_hdr_t *hdr, const pvr_vertex_t *verts, int count);
+// The same in the opaque list, streamed as it comes (dreamcast/swirl.c).
+int gfx_op_native(const pvr_poly_hdr_t *hdr, const pvr_vertex_t *verts, int count);
+
+// Every colour drawn from here on scaled by keep / 255 (red, green, blue; not
+// alpha), for a fade to black drawn into the frame (dreamcast/cover.h). 255
+// draws colours as they are.
+void gfx_set_fade(int keep);
+extern int gDcFadeOn;
+extern unsigned char gDcFadeLut[256];
+
+static inline unsigned int gfx_fade_argb(unsigned int c) {
+    if (!gDcFadeOn) {
+        return c;
+    }
+    return (c & 0xFF000000u) | ((unsigned int) gDcFadeLut[(c >> 16) & 0xFF] << 16) |
+           ((unsigned int) gDcFadeLut[(c >> 8) & 0xFF] << 8) | gDcFadeLut[c & 0xFF];
+}
+
+// While set, opaque untextured 2D batches are a cover over the whole scene,
+// drawn in the opaque list; see gfx.c. The display list sets it (PC_COVER_*).
+void gfx_set_cover(int enable);
+
+// Fill profile (FILL_PROF=1, see gfx.c): the display list's category, one
+// vertex as it goes out in framebuffer pixels, the start of each frame's
+// walk, and the per-scene report.
+void gfx_prof_set_category(int cat);
+void gfx_prof_fill_vert(float x, float y, int eol);
+void gfx_fill_frame(int counted);
+void gfx_fill_frame_done(unsigned int renderUs);
+void gfx_fill_report(void);
+void gfx_prof_set_skip(int code);
 
 // Whether the surface blends with what is behind it (RDP FORCE_BL). One that
 // does not is opaque whatever its alpha says, and goes to the opaque list.

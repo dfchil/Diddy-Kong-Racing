@@ -46,12 +46,43 @@ Measured on a Dreamcast with a broadband adapter, in the attract-mode demos
   one, each drawn with the coverage of two, and sprites that fill much of the
   screen fade out (`FSAA_PARTICLE_THIN`, `FSAA_PARTICLE_NEAR`). In a 5-minute
   attract run that cut late frames from 417 to 306 over the same seven scenes;
-  without FSAA there are 118.
+  without FSAA there are 118. With the fades, covers and display-list work
+  below, a run of all eight attract races back to back
+  (`DEMO_RACES_ONLY=1`, FSAA, 60 fps) had 170 late frames of about 17,000
+  (99.0% on time): one at each race's first frame, and the rest in fixed bursts
+  in the same places on every visit, mostly in Boulder Canyon (32), Ancient
+  Lake (36) and Whale Bay (40), where the PVR runs over.
+- **Options for recordings.** `SHOW_FPS=0` hides the frame rate in the corner;
+  `DEMO_RACES_ONLY=1` makes the attract loop show the title sequence once and
+  then only the demo races, round and round.
 - Measurement tools: a frame profile (`GFX_PROFILE=1`), per-handler timers
   (`=2`) and a sampling profiler (`=3`, writes `build/dc/prof_samples.bin`);
   `AUTO_EXIT_SECONDS`, `DEMO_LEVEL`, `SKIP_WATER`, `SKIP_PARTICLES`, `TEX_TRACE`; and a debug view
   (`DEBUG_VIEW=1`) that holds a frame and switches cutout modes from the
   controller.
+- The sampling profiler can sample any one map (`PROF_SAMPLE_MAP`), and
+  `GFX_PROFILE=4` counts only the samples of frames that were late.
+- The scene report gives the PVR's render time per scene (`SCENE PVR`: map,
+  average, longest, frames over one field). `FILL_PROF=1` adds what each list
+  fills, by display-list category and translucent class, in screens of area
+  and tiles, the surfaces that fill most, and one `FF` line per frame for
+  fitting render time to fill. `PROF_SKIP` leaves part of the frame out
+  (a list, a category, a translucent class); `PROF_SKIP=999` cycles through
+  them every ten frames to measure them all in one run.
+- **The profile no longer makes the frames it measures late.** Its lines, the
+  game's debug messages and the `fps:` line went out with printf as they came,
+  each a round trip to the host over dcload, and a `GFX LONG FRAME` line made
+  the frames after it long too: two runs of the same build gave race 28 10 and
+  39 late frames. While a scene plays they now collect in RAM and print while
+  the next scene loads; two runs now agree. The `fps:` line is only in profile
+  builds. The scene report also lists the combiners that ran per vertex
+  (`SCENE SLOWCC`) and how often batches were classified (`SCENE CC`).
+- The scene report gives the display-list walk's cache stalls a frame,
+  operand and instruction cache apart (the SH4's second performance counter),
+  texture lookups and scans a frame, and where the walk's stack is.
+- The scene report says how much of the heap each scene left in use
+  (`SCENE HEAP`): the attract run peaks at 1.9 MB, with about 10 MB above code
+  and data.
 
 ### Changed
 
@@ -76,9 +107,51 @@ Measured on a Dreamcast with a broadband adapter, in the attract-mode demos
   late frames in races 18 and 28 from 9 and 16 to 1 and 9 per 5-minute attract
   run. The GFX_PROFILE build checks every culled batch against its own
   vertices and the level's draw matrix against the cull matrix.
+- **The circle transition's solid black is opaque.** It was all blended, two
+  full-screen fills with FSAA. Its solid quarters are now a cover in the opaque
+  list, nearer than the whole scene and writing depth, so the punch-through and
+  translucent lists drawn after it stay under it; only the soft edge is
+  blended. With FSAA the title beach's scene had 76-83 late frames, all in the
+  iris-out at its end; it now has none there.
+- **2D keeps its place among covers.** The 2D drawn after the scene (HUD,
+  text, the title screen's logo and menu) is drawn at a depth above the whole
+  scene, with a depth test: what the display list draws before a cover lies
+  under it and what it draws after lies over it. A cover used to fall back to
+  blending whenever 2D had gone to the translucent list first, which the title
+  screen always does, and the title screen keeps an open iris drawn around the
+  edges of the picture: with FSAA it lost 85-94 frames each time it came round
+  in a 5-minute attract run. Late frames over that run fell from 228 to 67.
+- **Fades to black are drawn into the frame.** A full-screen fade was a
+  blended rect over every pixel, about 4.5 ms of PVR time a frame with FSAA.
+  The fade announces itself while the display list is built, and the port
+  draws everything before it with its colours scaled by what the fade leaves
+  of them, which is what blending black over them does, and leaves the rect
+  out. Each attract race opens with a 22-frame fade-in; with FSAA every one of
+  those frames was late. Frames the PVR alone made late fell from 35 to 14 in
+  race 18 and from 21 to 1 in race 28, and late frames in race 18 from 35 to
+  12-14 (two runs each, 120 s attract benchmark). The logo, swirl and title
+  scenes render about 1 ms faster on average. Fades to white still blend.
 - Per-batch render state is cached: combiner classification, compiled polygon
   headers, texture lookups and scissor checks.
 - PVR render time fell by about a third with twiddled textures.
+- **Display-list translation is 12-17% cheaper.** About half of it was the
+  CPU waiting on its caches, both direct-mapped (8 KB of code, 16 KB of
+  data). The handlers every batch runs now sit in `.sub0`, which KOS aligns to
+  the instruction cache and checks fits in it, with their cold paths split
+  out, and the walk's state in one data section aligned to the operand cache;
+  so they no longer evict each other, and an unrelated change no longer moves
+  them. The blast path projects each vertex once all the way to what the PVR
+  is sent, two vertices at a time, and writes vertices with registers-only
+  pointers, pre-decrement stores and (for the recorded lists) `movca.l`; it
+  prefetches the batch's vertices, triangles and the display list. Combiners
+  that mix shade are compiled per state rather than interpreted per vertex,
+  and a texture is looked up only when the texture state changes. In the
+  120-second attract run (each build also linked 384 bytes higher, to show
+  what is layout), display-list time and late frames went from 6.95-7.08 ms
+  and 27-29 to 5.66-5.78 ms and 8 in the title scene, 7.95-8.20 ms and 0-2 to
+  6.79-7.00 ms and 0-1 in race 18, and 10.94-11.57 ms and 9-10 to 9.80-9.94 ms
+  and 5 in race 28. HDMI captures match the old build's frames to within
+  rounding (at most 2 levels, in about 5% of pixels).
 
 ### Fixed
 
@@ -95,8 +168,15 @@ Measured on a Dreamcast with a broadband adapter, in the attract-mode demos
 - Prefetching the display list four commands ahead, and keeping the blast
   path's clip-space corners only for batches that need the near-clipper: each
   made display-list time 0.15-0.3 ms a frame worse in every attract scene.
+  That was measured while the hot code still moved with every change, which
+  alone shifts display-list time by 2-6%; the display list is now prefetched.
 - Drawing blended cutouts twice (punch-through under blended): no better edges,
   up to 1 ms slower.
+- Queuing every batch as its own enDjinn renderer (all three lists recorded,
+  the display-list walk before the PVR wait, 170–310 renderers a frame in
+  races): 168 and 169 late frames in two attract runs, against 58 and 56 for
+  `ENJ_LOOP=1` with three renderers. Recording the opaque list and replaying it
+  cost 0.6–0.8 ms a frame, up to 3.7 ms, on top of a 10% slower walk.
 
 ## Audio (AICAflow)
 
@@ -119,7 +199,16 @@ Measured on a Dreamcast with a broadband adapter, in the attract-mode demos
   their scene packs.
 - AICAflow and AICAforge are pinned to their current mains, with the review
   and firmware fixes.
-
+- AICAflow is pinned to its event-driven driver (firmware ABI 8,
+  [AICAflow #12](https://github.com/dfchil/AICAflow/pull/12)): the AICA reports
+  every change of state by interrupt, AICAflow's event thread frees an instance
+  that ended, and its end callback queues the report for DKR, which completes
+  the sound's owner or clears the song under its audio lock on the next tick.
+  The callback only queues because the game holds that lock while it waits for
+  instances to end. Each audio tick now only sends commands: no `afx_update()`,
+  no recycling. In attract runs DKR's audio took 2.20 ms of SH4 time a second
+  against 2.55 ms with the polling driver (event thread and callback
+  included), and the music and effects played as before.
 - No audio loader thread: a sound that no pack lists is loaded by the game
   thread between frames, outside any lock, instead of on a `sfx-loader`
   thread.
@@ -128,6 +217,78 @@ Measured on a Dreamcast with a broadband adapter, in the attract-mode demos
 
 - Sound effects were silently dropped while music and engine loops played,
   because the SH4 refused work it counted as over budget.
+
+## Boot screen
+
+- **The Dreamcast swirl spins in place of the N64 logo.** It is a 3D model in
+  the game's own object format, built by `dreamcast/swirl/make_swirl.py` from
+  the swirl in the public-domain Dreamcast logo SVG on Wikimedia Commons, and
+  embedded in the program; the port serves it when the boot screen loads the
+  N64 logo model, so `assets.bin` is unchanged. It is the European swirl's
+  blue on every console, which also sits best with the sky behind it;
+  `SWIRL_ORANGE=1` gives it the orange of the Dreamcast's own boot screen,
+  #FF5C00, as its albedo (lit, its face comes out lighter, about #EE9E3A).
+- **The swirl is lit and drawn natively.** Its faces are flat and its edge is
+  rounded by a narrow bevel. Every frame each of its 1370 distinct vertices is
+  lit on the SH4 with sh4zam from the rendering equation: Lambert diffuse and
+  Cook-Torrance specular (GGX, Smith-Schlick, Schlick's Fresnel) for a
+  lacquer, a warm key and a cool rim light that keep to the camera, the sky's
+  irradiance, and the sky reflected, staying put as the swirl turns; then ACES
+  tone mapped. The game's model is only a stand-in: the display-list walk
+  projects each distinct vertex once and streams 184 triangle strips into the
+  opaque list, instead of the game drawing 1828 triangles through 115 N64
+  batches, which had cut the boot screen to 40 fps. It holds 60.
+- **A glint crosses the swirl.** Each time the swirl turns square on to the
+  camera, once it has faded in, a narrow band of warm light sweeps across its
+  face, leaning, like light catching lacquer: it lies where the eye is, as
+  the reflection of a light by the camera would, stretched so it takes the
+  turn from 40 degrees one side to 40 the other, and is brightest square on.
+  The band is a small texture the PVR lays across the strips in the same
+  pass, with the lit colour added as the offset colour, so it costs no more
+  geometry. The eye comes from the matrix the swirl is drawn with.
+- **A soft halo behind the swirl.** `make_swirl.py` fills the swirl's
+  outline and blurs it (two Gaussians, a close and a wide one) into a
+  128x128 texture; the port lays it on a square in the swirl's own plane,
+  so it turns with it, just behind it, and adds it to the sky in the swirl's
+  colour taken halfway towards a warm white: a glow round the edges and
+  between the arms. With the glint it costs the SH4 under half a millisecond in a
+  frame with the swirl, and the boot screen still holds 60.
+- **The halo no longer shows as a flat sheet.** A second square stands across
+  the first, through the swirl's vertical axis, with the swirl's outline seen
+  from the side, blurred the same way. Each is weighted by the cosine squared
+  of its angle to the eye, so they cross-fade, neither is seen edge on, and
+  together they never light the sky more than one would. `HALO_CROSS=0` keeps
+  the single halo, which then fades out over its last degrees before edge on
+  (82 to 88 degrees from square on).
+- **A chime as the swirl appears, from the builder's own copy.** Given the
+  recording, the boot screen plays it once each time it shows the swirl. The
+  repository holds no sound: like the ROM, the chime is read at build time from
+  WAV files named by `SWIRL_CHIME_LEFT` (and `SWIRL_CHIME_RIGHT`), each with the
+  chime in one channel; without them there is no chime and nothing plays.
+  `dreamcast/swirl/make_chime.py` takes each take to mono, cuts its leading
+  silence and stores it as PCM16 with a one-note-a-take AICAflow flow
+  (`afx_compile`). `SWIRL_CHIME_MODE=ringring` (the default) plays the left
+  take on the left and the right take on the right 0.15 s later, as rings
+  alternate in Sonic (`afx_profile` pans each note; 109 KB of AICA RAM), or the
+  left take alone without a right one; `centred` plays the left take alone in
+  the middle (53 KB). It is loaded with the boot
+  screen's sounds, after its packs and before its song, charged to that scene
+  in the AICA RAM budget, and freed when the scene ends. The swirl asks for it
+  the first time it is drawn; the sound code starts it as the scene gate opens,
+  with the first frame, as the screen fades in from black with the intro
+  music. The note's velocity sets its level in the AICA (13.5 dB below full
+  scale), so the sample keeps its full resolution.
+- **"Nintendon't".** On the title screen's beach, "n't" is scratched into the
+  sand right after the Nintendo logo, at its letter size, as if drawn with a
+  finger. It is the game's one bump-mapped surface: `dreamcast/scrawl/make_scrawl.py`
+  finds the logo on the level model, draws the strokes as a height field and
+  writes its normal map, which pvrtex makes a 512x512 VQ-compressed PVR bump
+  texture (66 KB) over just the letters, without mipmaps so it stays sharp at
+  the beach's low angle, and a grid of vertices that follows the sand. The level draw marks
+  the spot after the logo's batch; the display-list walk draws it there in two
+  passes, darkening the walls that face away from the light (to no less than
+  60%) and lightening those that face it, so the sand around it stays exactly
+  as it was.
 
 ## Scenes
 
@@ -155,6 +316,15 @@ Measured on a Dreamcast with a broadband adapter, in the attract-mode demos
   scene's first logic step, which spawns its objects, counts as part of the
   load. In the attract demos no texture, model or sound is now read while a
   scene runs.
+- **Sprites and particle textures stay loaded for the scene.** Each time the
+  last particle or sprite of a kind went, the game freed its textures, and the
+  next spawn loaded and unpacked them again: in late frames of the title
+  scene, a quarter of the CPU time was spent in gzip, the memory pool and
+  `load_texture`. One whose last user lets go while the scene plays is now held
+  with no users and found again in the cache; the next scene's load frees what
+  is left, as does an allocation that needs the room. In the 120-second attract
+  run late frames fell from 46 to 37, and no frame is more than one field late
+  (the title scene had frames four fields long).
 
 ## Build
 
@@ -184,11 +354,38 @@ Measured on a Dreamcast with a broadband adapter, in the attract-mode demos
   inlined and laid out: 1.5x the frames with over 11 ms of display-list time.
   With one partition there were about a third as many as before the switch,
   and the result no longer depends on the link order.
+- **`assets.bin` stays on disc.** The port loaded the whole 10 MB asset
+  image into RAM, as a cart is to the N64; each asset "DMA" now reads it from
+  the file, which leaves 8.8 MB free. What scenes read comes from RAM:
+  - every section under 128 KB (tables, headers, text) and the 2D textures
+    (HUD, menu and sprite images), 1.3 MB, are read at boot and kept;
+  - each scene has a pack (`build/dc/assetscenes/LEVEL.dsp`, made by
+    `dreamcast/build_asset_scenes.py`), which the scene gate reads in one pass
+    when the scene starts loading and drops when the next one does. It holds
+    the level's header, level model, object map and level-model textures,
+    found from the level itself, and what `dreamcast/assets.scenes` lists:
+    ranges a `TEX_TRACE=1` run saw the scene read beyond that (the objects it
+    spawns), merged by `dreamcast/record_scenes.py`. The attract scenes' packs
+    are 12–414 KB, read in 4–56 ms over `/pc`.
+
+  In two attract runs nothing was read from disc while a scene played, scene
+  loads took as long as with the whole image in RAM (2.0–2.4 s for a race),
+  and there were 50 and 46 late frames (53 and 55 before). The N64 sound
+  samples (3.8 MB) are never read, since AICAflow plays its own. Reads while a
+  scene plays are counted per scene (`ASSET PLAY` with `GFX_PROFILE=1`).
+  `ASSET_RESIDENT=1` loads the whole image as before; `ASSET_TRACE=1` prints
+  which parts of it a run read.
+- `ENJ_INPUT=1` reads all four controller ports through enDjinn's controller
+  layer (`enj_ctrl`) instead of port 0 through KOS maple calls, and reports
+  every connected pad to the game, so two to four players can join. Off by
+  default until it has been played with.
 - `dreamcast/build.sh` builds the port from a clean clone and your ROM, after
   checking the toolchain, `pvrtex`, sh4zam and Python. A fresh clone built with
   it produces the same textures, scene bundles and AICAflow files, byte for
   byte, as the development tree.
 - `Makefile.dc` fetches AICAforge, which AICAflow pins with `update = none`,
   so a recursive clone no longer stops at the missing sound tools.
+- AICAflow's submodule is cloned over https; its SSH URL needed a GitHub key.
+  The README gives the 60 fps FSAA build line and the recording options.
 - The disc build starts its audio folder afresh, so files from older builds do
   not stay on the disc.
