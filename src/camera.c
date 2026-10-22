@@ -1299,6 +1299,12 @@ void render_ortho_triangle_image(Gfx **dList, Mtx **mtx, Vertex **vtx, ObjectSeg
  * Generate a matrix with rotation, scaling and shearing and run it.
  * Used for wavy type effects like the shield.
  */
+#ifdef TARGET_DC
+// GCC 15 crashes in this function's register allocation (gen_reg_rtx during
+// reload, under LTO) in some builds, toggled by unrelated header changes. It
+// only draws the shield and magnet effects, so it does without -O3.
+__attribute__((optimize("O1"), noinline))
+#endif
 void mtx_shear_push(Gfx **dList, Mtx **mtx, Object *obj, Object *objBase, f32 shear) {
     UNUSED s32 pad;
     f32 cossf_x_arg2;
