@@ -825,9 +825,18 @@ static s32 sFadeAnnounced = -1;
 static s32 sFadeAlpha = -1;
 static s32 sFadeSkipRect; // between the fade's tags: its rect is not drawn
 static s32 sFadeKeep = 255; // what the fade leaves of each colour, 255 for none
+static u32 sFadeAdd;        // what it adds: its colour times its alpha, 0x00RRGGBB
+static u32 sFadeAnnouncedRgb;
 
-void pc_fade_announce(int alpha) {
+void pc_fade_announce(int r, int g, int b, int alpha) {
     sFadeAnnounced = alpha;
+    sFadeAnnouncedRgb = ((u32) (r & 0xFF) << 16) | ((u32) (g & 0xFF) << 8) | (u32) (b & 0xFF);
+}
+
+/** Colour c (0x00RRGGBB) times a / 255, per channel. */
+static u32 rgb_scale(u32 c, u32 a) {
+    return (((((c >> 16) & 0xFF) * a) / 255u) << 16) | (((((c >> 8) & 0xFF) * a) / 255u) << 8) |
+           (((c & 0xFF) * a) / 255u);
 }
 
 // A sun glare this frame (dreamcast/cover.h), as announced while the display
@@ -3492,7 +3501,7 @@ static __attribute__((noinline)) void handle_tag(u32 w1) {
         sGlareSkipRect = sGlareOn;
         if (sGlareOn) {
             sGlareOn = FALSE;
-            gfx_set_fade(sFadeKeep);
+            gfx_set_glare(sFadeKeep, sFadeAdd);
         }
     } else if (w1 == PC_GLARE_END_TAG) {
         sGlareSkipRect = FALSE;
@@ -4177,18 +4186,18 @@ static void frame_walk(void *data) {
     sFadeAnnounced = -1;
     sFadeSkipRect = FALSE;
     sFadeKeep = (sFadeAlpha > 0 && sFadeAlpha < 255) ? 255 - sFadeAlpha : 255;
+    sFadeAdd = sFadeKeep < 255 ? rgb_scale(sFadeAnnouncedRgb, (u32) sFadeAlpha) : 0;
     // The sun glare, drawn into everything before its rect: each colour times
-    // 1 - a, plus its colour times a, and both times the fade drawn after it.
+    // 1 - a, plus its colour times a, and that faded by the fade drawn after it.
     sGlareOn = sGlareAnnounced > 0;
     sGlareSkipRect = FALSE;
     if (sGlareOn) {
-        u32 a = (u32) sGlareAnnounced, k = (u32) sFadeKeep, c = sGlareAnnouncedRgb;
-        u32 add = (((((c >> 16) & 0xFF) * a * k) / (255u * 255u)) << 16) |
-                  (((((c >> 8) & 0xFF) * a * k) / (255u * 255u)) << 8) | (((c & 0xFF) * a * k) / (255u * 255u));
+        u32 a = (u32) sGlareAnnounced, k = (u32) sFadeKeep;
 
-        gfx_set_glare((s32) ((k * (255u - a) + 127u) / 255u), add);
+        gfx_set_glare((s32) ((k * (255u - a) + 127u) / 255u),
+                      gfx_add_rgb(rgb_scale(rgb_scale(sGlareAnnouncedRgb, a), k), sFadeAdd));
     } else {
-        gfx_set_fade(sFadeKeep);
+        gfx_set_glare(sFadeKeep, sFadeAdd);
     }
     sGlareAnnounced = -1;
 #if DKR_GFX_PROFILE

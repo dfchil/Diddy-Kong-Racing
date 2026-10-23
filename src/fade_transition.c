@@ -447,9 +447,7 @@ void transition_render_fullscreen(Gfx **dList, UNUSED Mtx **mtx, UNUSED Vertex *
     gDPSetCombineMode((*dList)++, G_CC_PRIMITIVE, G_CC_PRIMITIVE);
 #ifdef TARGET_DC
     // See dreamcast/cover.h.
-    if (gCurFadeRed == 0 && gCurFadeGreen == 0 && gCurFadeBlue == 0) {
-        pc_fade_announce(gCurFadeAlpha);
-    }
+    pc_fade_announce(gCurFadeRed, gCurFadeGreen, gCurFadeBlue, gCurFadeAlpha);
     gDPNoOpTag((*dList)++, PC_FADE_BEGIN_TAG);
 #endif
     gDPFillRectangle((*dList)++, 0, 0, screenSize & 0x3FF, (screenSize >> 16) & 0x3FF);

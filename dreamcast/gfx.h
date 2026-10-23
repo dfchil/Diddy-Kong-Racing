@@ -142,10 +142,11 @@ static inline unsigned int gfx_fade_argb(unsigned int c) {
            ((unsigned int) gDcFadeLut[(c >> 8) & 0xFF] << 8) | gDcFadeLut[c & 0xFF];
 }
 
-// A sun glare drawn into the frame (dreamcast/cover.h): what blending its rect
-// over a pixel adds, its colour times its alpha (and times any fade drawn after
-// it), as 0x00RRGGBB; 0 for none. Its scaling part is in the fade table above.
-// gfx_set_glare sets both; gfx_set_fade clears the glare.
+// What the sun glare and a coloured fade drawn into the frame add to every
+// colour (dreamcast/cover.h): each one's colour times its alpha, the glare's
+// also times the fade drawn after it, as 0x00RRGGBB; 0 for none. Their scaling
+// part is in the fade table above. gfx_set_glare sets both; gfx_set_fade
+// clears the addition.
 void gfx_set_glare(int keep, unsigned int add);
 extern unsigned int gDcGlareAdd;
 
