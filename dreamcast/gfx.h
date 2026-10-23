@@ -16,7 +16,11 @@
 // the link if it outgrows one cache's worth, so the hot handlers sit at a fixed
 // place in the cache and never on top of each other. Their cold paths are
 // split out of them to keep it that way.
-#if (defined(DKR_GFX_PROFILE) && DKR_GFX_PROFILE == 2) || (defined(DKR_FILL_PROF) && DKR_FILL_PROF)
+#if defined(DKR_HOTLAYOUT) && DKR_HOTLAYOUT
+// HOTLAYOUT=1: each hot function keeps its own .text.<name> section, which the
+// ordering file from dreamcast/hotlayout.tsv places at a fixed slot.
+#define DKR_HOT_CODE
+#elif (defined(DKR_GFX_PROFILE) && DKR_GFX_PROFILE == 2) || (defined(DKR_FILL_PROF) && DKR_FILL_PROF)
 // The per-handler timers, and the fill profile's per-vertex calls, do not fit
 // in one cache's worth; they disturb the timing anyway. Kept together all the
 // same.

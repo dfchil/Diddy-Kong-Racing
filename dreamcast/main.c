@@ -742,7 +742,10 @@ static DKR_HOT u32 sGfxFrameCount = 0;
 // Aligns the hot data section (DKR_HOT) to the operand cache's size, so its
 // lines land on the same cache sets whatever else grows or shrinks, and an A/B
 // of an unrelated change does not move them onto something else.
-static DKR_HOT __attribute__((used, aligned(16384))) u32 sHotDataAnchor;
+#ifndef DKR_HOT_DATA_ALIGN
+#define DKR_HOT_DATA_ALIGN 16384 // HOT_DATA_ALIGN=32 lets a HOTLAYOUT config choose the residue
+#endif
+static DKR_HOT __attribute__((used, aligned(DKR_HOT_DATA_ALIGN))) u32 sHotDataAnchor;
 
 alignas(32) static DKR_HOT f32 sMatrices[3][4][4]; // G_MTX_DKR_INDEX_0..2
 static DKR_HOT s32 sCurMatrix = 0;
@@ -4193,6 +4196,44 @@ static void frame_walk(void *data) {
 
 }
 
+#if DKR_SHP
+#include "shp_sampler.h"
+#include "shp_pmu.h"
+// sh4-hotlayout (SHP=1): the sampler's sections split the display-list walk
+// from the rest of the frame; its phases are the maps, numbered in the order
+// they first appear (the report's --phase-names), and each map's walks are one
+// PMU bucket, numbered by map id.
+enum { SHP_SEC_OTHER, SHP_SEC_WALK };
+static s32 sShpMaps[16];
+static s32 sShpMapCount;
+
+static unsigned shp_map_phase(s32 map) {
+    s32 i;
+
+    for (i = 0; i < sShpMapCount; i++) {
+        if (sShpMaps[i] == map) return (unsigned) i;
+    }
+    if (sShpMapCount < 16) {
+        sShpMaps[sShpMapCount] = map;
+        return (unsigned) sShpMapCount++;
+    }
+    return 15;
+}
+
+/** Saves the samples and prints the PMU buckets and the phase names. */
+static void shp_finish(void) {
+    s32 i;
+
+    shp_write("/pc/build/dc/profile.shps");
+    shp_pmu_print();
+    printf("SHP phase names:");
+    for (i = 0; i < sShpMapCount; i++) {
+        printf("%s%ld=map%ld", i ? "," : " ", (long) i, (long) sShpMaps[i]);
+    }
+    printf("\n");
+}
+#endif
+
 static void gfx_task_draw(void *dlBegin, void *dlEnd) {
     FrameDl frame = { dlBegin, dlEnd };
 #if DKR_GFX_PROFILE
@@ -4204,7 +4245,21 @@ static void gfx_task_draw(void *dlBegin, void *dlEnd) {
     gfx_frame_render(frame_walk, &frame);
 #else
     gfx_frame_begin();
+#if DKR_SHP
+    {
+        extern s32 gMapId;
+        s32 window = pc_scene_is_ready();
+
+        shp_phase(shp_map_phase(gMapId));
+        shp_section(SHP_SEC_WALK);
+        if (window) window = shp_pmu_open((u32) gMapId < SHP_PMU_BUCKETS ? (u32) gMapId : SHP_PMU_BUCKETS - 1);
+        frame_walk(&frame);
+        if (window) shp_pmu_close();
+        shp_section(SHP_SEC_OTHER);
+    }
+#else
     frame_walk(&frame);
+#endif
     gfx_frame_end();
 #endif
 #if DKR_GFX_PROFILE
@@ -4217,6 +4272,9 @@ static void gfx_task_draw(void *dlBegin, void *dlEnd) {
         pc_scene_prof_report();
 #endif
         prof_sample_write();
+#if DKR_SHP
+        shp_finish();
+#endif
 #if DKR_GFX_PROFILE
         pc_prof_log_flush();
 #endif
@@ -4271,6 +4329,9 @@ static void enj_frame_submitted(void *data) {
         pc_scene_prof_report();
 #endif
         prof_sample_write();
+#if DKR_SHP
+        shp_finish();
+#endif
 #if DKR_GFX_PROFILE
         pc_prof_log_flush();
 #endif
@@ -4306,6 +4367,10 @@ static void cont_reset_btn_callback_(uint8_t addr, uint32_t btns) {
 int main(int argc, char **argv) {
     cont_btn_callback(0, CONT_RESET_BUTTONS, cont_reset_btn_callback_);
     prof_sample_start();
+#if DKR_SHP
+    // 2 MiB, about 260 s of samples, taken before the game's own allocations.
+    if (!shp_reserve(2 * SHP_DEFAULT_CAPACITY) || !shp_start(0)) printf("SHP: sampler not started\n");
+#endif
 
     printf("=== DKR PC ===\n");
     sHostThread.id = 3;
