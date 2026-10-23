@@ -904,7 +904,7 @@ static void header_cache_clear(void) {
 
 static __attribute__((noinline, cold)) void compile_header_uncached(int list, pvr_poly_hdr_t *out);
 
-static DKR_HOT_CODE void compile_header_for(int list, pvr_poly_hdr_t *out) {
+static DKR_HOT_CODE_SPARE void compile_header_for(int list, pvr_poly_hdr_t *out) {
     // Everything compile_header_uncached reads, and a top bit so no key is 0.
     unsigned int key = 0x80000000u | ((unsigned int) list << 20) | ((unsigned int) sBoundTex << 6) |
                        ((sFilterPoint != 0) << 5) | ((sScisEnable != 0) << 4) | ((sDepthTest != 0) << 3) |

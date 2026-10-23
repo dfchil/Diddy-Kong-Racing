@@ -28,6 +28,14 @@
 #else
 #define DKR_HOT_CODE __attribute__((section(".sub0.dkr_hot")))
 #endif
+// The hot handler that leaves .sub0 in a frame-profile build (GFX_PROFILE=1,
+// 3, 4): the profile's counters in the others add about 1.3 KB, 24 bytes more
+// than the cache holds. Its layout differs from the game's build anyway.
+#if defined(DKR_GFX_PROFILE) && DKR_GFX_PROFILE && !(defined(DKR_HOTLAYOUT) && DKR_HOTLAYOUT)
+#define DKR_HOT_CODE_SPARE __attribute__((section(".text.dkr_hot")))
+#else
+#define DKR_HOT_CODE_SPARE DKR_HOT_CODE
+#endif
 
 // Host graphics layer (linux/gfx.c) — SDL2 + OpenGL.
 //
