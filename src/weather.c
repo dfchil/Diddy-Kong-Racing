@@ -8,6 +8,9 @@
 #include "fade_transition.h"
 #include "macros.h"
 #include "math_util.h"
+#ifdef TARGET_DC
+#include "../dreamcast/cover.h"
+#endif
 #include "objects.h"
 #include "PRinternal/viint.h"
 #include "structs.h"
@@ -738,7 +741,17 @@ void lensflare_render(Gfx **dList, Mtx **mats, Vertex **verts, Camera *camera) {
                 gDPSetPrimColor(gfxTemp++, 0, 0, lensFlareEntry->red, lensFlareEntry->green, lensFlareEntry->blue,
                                 (s32) (lensFlareEntry->alpha * magSquareSquared));
                 gDPSetCombineMode(gfxTemp++, G_CC_PRIMITIVE, G_CC_PRIMITIVE);
+#ifdef TARGET_DC
+                // The glare is a blended full-screen fill. The port draws it
+                // into the frame instead (dreamcast/cover.h), and skips the rect.
+                pc_glare_announce(lensFlareEntry->red, lensFlareEntry->green, lensFlareEntry->blue,
+                                  ((s32) (lensFlareEntry->alpha * magSquareSquared)) & 0xFF);
+                gDPNoOpTag(gfxTemp++, PC_GLARE_BEGIN_TAG);
+#endif
                 gDPFillRectangle(gfxTemp++, 0, 0, width, height);
+#ifdef TARGET_DC
+                gDPNoOpTag(gfxTemp++, PC_GLARE_END_TAG);
+#endif
                 gDPPipeSync(gfxTemp++);
                 *dList = gfxTemp;
                 rendermode_reset(dList);

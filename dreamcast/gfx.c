@@ -999,9 +999,17 @@ static void compile_header(void) {
 int gDcFadeOn;
 unsigned char gDcFadeLut[256];
 
+unsigned int gDcGlareAdd;
+
+void gfx_set_glare(int keep, unsigned int add) {
+    gfx_set_fade(keep);
+    gDcGlareAdd = add & 0x00FFFFFFu;
+}
+
 void gfx_set_fade(int keep) {
     int c;
 
+    gDcGlareAdd = 0;
     if (keep >= 255) {
         gDcFadeOn = 0;
         return;
@@ -1059,10 +1067,10 @@ static void emit_vert(const GfxTriVert *s, int eol, float uScale, float vScale) 
         if (dg < 0) dg = 0;
         if (db < 0) db = 0;
         v->argb = gfx_fade_argb(pack_argb(sBlendColor[3], (unsigned char) dr, (unsigned char) dg, (unsigned char) db));
-        v->oargb = gfx_fade_argb(((unsigned int) s->r << 16) | ((unsigned int) s->g << 8) | (unsigned int) s->b);
+        v->oargb = gfx_frame_oargb(((unsigned int) s->r << 16) | ((unsigned int) s->g << 8) | (unsigned int) s->b);
     } else {
-        v->argb = gfx_fade_argb(pack_argb(s->a, s->r, s->g, s->b));
-        v->oargb = 0;
+        v->argb = gfx_frame_argb(pack_argb(s->a, s->r, s->g, s->b), sBoundTex != 0);
+        v->oargb = sBoundTex != 0 ? gDcGlareAdd : 0;
     }
     ta_commit(v);
 }

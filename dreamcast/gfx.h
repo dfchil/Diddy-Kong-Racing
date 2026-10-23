@@ -142,6 +142,38 @@ static inline unsigned int gfx_fade_argb(unsigned int c) {
            ((unsigned int) gDcFadeLut[(c >> 8) & 0xFF] << 8) | gDcFadeLut[c & 0xFF];
 }
 
+// A sun glare drawn into the frame (dreamcast/cover.h): what blending its rect
+// over a pixel adds, its colour times its alpha (and times any fade drawn after
+// it), as 0x00RRGGBB; 0 for none. Its scaling part is in the fade table above.
+// gfx_set_glare sets both; gfx_set_fade clears the glare.
+void gfx_set_glare(int keep, unsigned int add);
+extern unsigned int gDcGlareAdd;
+
+/** Each colour channel of c plus add's, saturating; c's alpha is kept. */
+static inline unsigned int gfx_add_rgb(unsigned int c, unsigned int add) {
+    unsigned int r = ((c >> 16) & 0xFF) + ((add >> 16) & 0xFF);
+    unsigned int g = ((c >> 8) & 0xFF) + ((add >> 8) & 0xFF);
+    unsigned int b = (c & 0xFF) + (add & 0xFF);
+
+    return (c & 0xFF000000u) | ((r > 255 ? 255 : r) << 16) | ((g > 255 ? 255 : g) << 8) | (b > 255 ? 255 : b);
+}
+
+/**
+ * A vertex colour as this frame draws it: faded, and for an untextured polygon
+ * also the glare added (a textured one carries the glare in its offset colour,
+ * gfx_frame_oargb, which the PVR adds after the texture).
+ */
+static inline unsigned int gfx_frame_argb(unsigned int c, int textured) {
+    c = gfx_fade_argb(c);
+    return (gDcGlareAdd && !textured) ? gfx_add_rgb(c, gDcGlareAdd) : c;
+}
+
+/** A textured polygon's offset colour as this frame draws it: faded, plus the glare. */
+static inline unsigned int gfx_frame_oargb(unsigned int o) {
+    o = gfx_fade_argb(o);
+    return gDcGlareAdd ? gfx_add_rgb(o, gDcGlareAdd) : o;
+}
+
 // While set, opaque untextured 2D batches are a cover over the whole scene,
 // drawn in the opaque list; see gfx.c. The display list sets it (PC_COVER_*).
 void gfx_set_cover(int enable);

@@ -824,9 +824,22 @@ static DKR_HOT u8 sBlendColor[4] = { 0x00, 0x00, 0x00, 0xFF }; // G_SETBLENDCOLO
 static s32 sFadeAnnounced = -1;
 static s32 sFadeAlpha = -1;
 static s32 sFadeSkipRect; // between the fade's tags: its rect is not drawn
+static s32 sFadeKeep = 255; // what the fade leaves of each colour, 255 for none
 
 void pc_fade_announce(int alpha) {
     sFadeAnnounced = alpha;
+}
+
+// A sun glare this frame (dreamcast/cover.h), as announced while the display
+// list was built: colour as 0x00RRGGBB and alpha, or alpha -1.
+static s32 sGlareAnnounced = -1;
+static u32 sGlareAnnouncedRgb;
+static s32 sGlareOn;       // the frame's walk draws the glare into what comes before its rect
+static s32 sGlareSkipRect; // between the glare's tags: its rect is not drawn
+
+void pc_glare_announce(int r, int g, int b, int alpha) {
+    sGlareAnnounced = alpha;
+    sGlareAnnouncedRgb = ((u32) (r & 0xFF) << 16) | ((u32) (g & 0xFF) << 8) | (u32) (b & 0xFF);
 }
 
 // Fog. The game recomputes this every frame, per player (src/tracks.c), out of the
@@ -2281,6 +2294,8 @@ static DKR_HOT f32 sBlastSX = 1.0f, sBlastSY = 1.0f;
 
 // Where a blended batch's vertices are recorded; NULL streams to the open list.
 static DKR_HOT pvr_vertex_t *sBlastRecord;
+// The batch's offset colour: the frame's glare for a textured batch, else 0 (gfx_frame_oargb).
+static DKR_HOT u32 sBlastOffset;
 // Depth = 1/w * mul + add: 1 and 0, but decals and far backdrops differ (gfx_blast_begin).
 static DKR_HOT f32 sBlastZMul = 1.0f, sBlastZAdd = 0.0f;
 
@@ -2298,20 +2313,20 @@ static DKR_HOT f32 sBlastZMul = 1.0f, sBlastZAdd = 0.0f;
  * global around each vertex.
  */
 /** A fade to black drawn into the frame (dreamcast/cover.h), on a batch's colours. Out of the hot section. */
-static __attribute__((noinline, cold)) void blast_fade_colors(u32 *argb, s32 count) {
+static __attribute__((noinline, cold)) void blast_fade_colors(u32 *argb, s32 count, s32 textured) {
     for (s32 i = 0; i < count; i++) {
-        argb[i] = gfx_fade_argb(argb[i]);
+        argb[i] = gfx_frame_argb(argb[i], textured);
     }
 }
 
 static inline void blast_put(pvr_vertex_t *vt, s32 alloc, u32 flags, f32 x, f32 y, f32 z, f32 u, f32 v,
-                             u32 argb) {
+                             u32 argb, u32 oargb) {
     u8 *top = (u8 *) vt + 32;
 
     if (alloc) {
         __asm__ __volatile__("movca.l r0, @%1" : "=m"(*vt) : "r"(vt), "z"(flags));
     }
-    __asm__ __volatile__("mov.l %[zero], @-%[p]\n\t"
+    __asm__ __volatile__("mov.l %[oargb], @-%[p]\n\t"
                          "mov.l %[argb], @-%[p]\n\t"
                          "fmov.s %[v], @-%[p]\n\t"
                          "fmov.s %[u], @-%[p]\n\t"
@@ -2320,7 +2335,7 @@ static inline void blast_put(pvr_vertex_t *vt, s32 alloc, u32 flags, f32 x, f32 
                          "fmov.s %[x], @-%[p]\n\t"
                          "mov.l %[flags], @-%[p]"
                          : [p] "+r"(top), "+m"(*vt)
-                         : [zero] "r"(0), [argb] "r"(argb), [v] "f"(v), [u] "f"(u), [z] "f"(z), [y] "f"(y),
+                         : [oargb] "r"(oargb), [argb] "r"(argb), [v] "f"(v), [u] "f"(u), [z] "f"(z), [y] "f"(y),
                            [x] "f"(x), [flags] "r"(flags));
 }
 
@@ -2336,14 +2351,16 @@ static inline void blast_emit(f32 x, f32 y, f32 invw, f32 u, f32 v, u32 color, u
 #if DKR_FILL_PROF
     gfx_prof_fill_vert(x * sBlastSX, y * sBlastSY, flags == PVR_CMD_VERTEX_EOL);
 #endif
-    color = gfx_fade_argb(color);
+    // color is final: the callers have faded it (and added an untextured batch's glare).
     if (rec) {
-        blast_put(rec, TRUE, flags, x * sBlastSX, y * sBlastSY, (invw * sBlastZMul) + sBlastZAdd, u, v, color);
+        blast_put(rec, TRUE, flags, x * sBlastSX, y * sBlastSY, (invw * sBlastZMul) + sBlastZAdd, u, v, color,
+                  sBlastOffset);
         sBlastRecord = rec + 1;
     } else {
         pvr_vertex_t *vt = (pvr_vertex_t *) pvr_dr_target();
 
-        blast_put(vt, FALSE, flags, x * sBlastSX, y * sBlastSY, (invw * sBlastZMul) + sBlastZAdd, u, v, color);
+        blast_put(vt, FALSE, flags, x * sBlastSX, y * sBlastSY, (invw * sBlastZMul) + sBlastZAdd, u, v, color,
+                  sBlastOffset);
         blast_sq_flush(vt);
     }
 }
@@ -2706,7 +2723,7 @@ static DKR_HOT_CODE void blast_render(const Vertex *verts, s32 numVerts, const V
     }
 
     if (gDcFadeOn) {
-        blast_fade_colors(argb, total);
+        blast_fade_colors(argb, total, texture != 0);
     }
 
     PROF_LAP(tXform);
@@ -2734,7 +2751,9 @@ static DKR_HOT_CODE void blast_render(const Vertex *verts, s32 numVerts, const V
         // advances.
         pvr_vertex_t *rec = sBlastRecord;
         u32 sq = pvr_dr_addr;
+        const u32 offset = texture != 0 ? gDcGlareAdd : 0;
 
+        sBlastOffset = offset; // for the near-clipper's corners
         for (i = 0; i < numTris; i++) {
             const Triangle *t = &tris[i];
             s32 i0 = t->vi0, i1 = t->vi1, i2 = t->vi2;
@@ -2785,17 +2804,17 @@ static DKR_HOT_CODE void blast_render(const Vertex *verts, s32 numVerts, const V
                 o2 = (pvr_vertex_t *) (sq ^ 32);
             }
             blast_put(o0, rec != NULL, PVR_CMD_VERTEX, px[i0], py[i0], pz[i0], t->uv0.u * uMul, t->uv0.v * vMul,
-                      argb[i0]);
+                      argb[i0], offset);
             if (!rec) {
                 blast_sq_flush(o0);
             }
             blast_put(o1, rec != NULL, PVR_CMD_VERTEX, px[i1], py[i1], pz[i1], t->uv1.u * uMul, t->uv1.v * vMul,
-                      argb[i1]);
+                      argb[i1], offset);
             if (!rec) {
                 blast_sq_flush(o1);
             }
             blast_put(o2, rec != NULL, PVR_CMD_VERTEX_EOL, px[i2], py[i2], pz[i2], t->uv2.u * uMul, t->uv2.v * vMul,
-                      argb[i2]);
+                      argb[i2], offset);
             if (!rec) {
                 blast_sq_flush(o2);
                 // Three flips from sq leave it where the third vertex went.
@@ -2859,6 +2878,7 @@ static s32 polygon_blast(const Triangle *tris, s32 count, s32 texEnabled) {
         vMul = shz_invf_fsrra(32.0f * (f32) sTileHeight) * vS;
     }
     PROF_ADD(tris, count);
+    sBlastOffset = texture != 0 ? gDcGlareAdd : 0;
     for (i = 0; i < count; i++) {
         const Triangle *t = &tris[i];
         const GfxVertex *a = &sVerts[t->vi0 % GFX_MAX_VERTS];
@@ -2876,13 +2896,16 @@ static s32 polygon_blast(const Triangle *tris, s32 count, s32 texEnabled) {
         PROF_ADD(sent, 1);
         PROF_ADD(sentFrame, 1);
         blast_emit(a->sx, a->sy, shz_invf_fsrra(a->sw), t->uv0.u * uMul, t->uv0.v * vMul,
-                   ((((u32) a->a << 24) | ((u32) a->r << 16) | ((u32) a->g << 8) | (u32) a->b) & keep) | konst,
+                   gfx_frame_argb(((((u32) a->a << 24) | ((u32) a->r << 16) | ((u32) a->g << 8) | (u32) a->b) & keep) | konst,
+                                  texture != 0),
                    PVR_CMD_VERTEX);
         blast_emit(b->sx, b->sy, shz_invf_fsrra(b->sw), t->uv1.u * uMul, t->uv1.v * vMul,
-                   ((((u32) b->a << 24) | ((u32) b->r << 16) | ((u32) b->g << 8) | (u32) b->b) & keep) | konst,
+                   gfx_frame_argb(((((u32) b->a << 24) | ((u32) b->r << 16) | ((u32) b->g << 8) | (u32) b->b) & keep) | konst,
+                                  texture != 0),
                    PVR_CMD_VERTEX);
         blast_emit(c->sx, c->sy, shz_invf_fsrra(c->sw), t->uv2.u * uMul, t->uv2.v * vMul,
-                   ((((u32) c->a << 24) | ((u32) c->r << 16) | ((u32) c->g << 8) | (u32) c->b) & keep) | konst,
+                   gfx_frame_argb(((((u32) c->a << 24) | ((u32) c->r << 16) | ((u32) c->g << 8) | (u32) c->b) & keep) | konst,
+                                  texture != 0),
                    PVR_CMD_VERTEX_EOL);
     }
     if (sBlastRecord) {
@@ -3425,7 +3448,7 @@ static __attribute__((noinline)) void handle_fillrect(u32 w0, u32 w1) {
     u8 color[4];
     u8 unlit[3] = { 0, 0, 0 };
 
-    if (sFadeSkipRect) {
+    if (sFadeSkipRect || sGlareSkipRect) {
         return;
     }
     if ((sOtherModeH & (3 << G_MDSFT_CYCLETYPE)) == G_CYC_FILL) {
@@ -3464,6 +3487,15 @@ static __attribute__((noinline)) void handle_tag(u32 w1) {
         gfx_set_fade(255);
     } else if (w1 == PC_FADE_END_TAG) {
         sFadeSkipRect = FALSE;
+    } else if (w1 == PC_GLARE_BEGIN_TAG) {
+        // Everything before it has the glare; what comes after is drawn over it.
+        sGlareSkipRect = sGlareOn;
+        if (sGlareOn) {
+            sGlareOn = FALSE;
+            gfx_set_fade(sFadeKeep);
+        }
+    } else if (w1 == PC_GLARE_END_TAG) {
+        sGlareSkipRect = FALSE;
     }
 #if DKR_GFX_PROFILE
     if ((w1 & 0xFFFFFF00u) == PC_PROF_CAT_TAG) {
@@ -4144,7 +4176,21 @@ static void frame_walk(void *data) {
     sFadeAlpha = sFadeAnnounced;
     sFadeAnnounced = -1;
     sFadeSkipRect = FALSE;
-    gfx_set_fade((sFadeAlpha > 0 && sFadeAlpha < 255) ? 255 - sFadeAlpha : 255);
+    sFadeKeep = (sFadeAlpha > 0 && sFadeAlpha < 255) ? 255 - sFadeAlpha : 255;
+    // The sun glare, drawn into everything before its rect: each colour times
+    // 1 - a, plus its colour times a, and both times the fade drawn after it.
+    sGlareOn = sGlareAnnounced > 0;
+    sGlareSkipRect = FALSE;
+    if (sGlareOn) {
+        u32 a = (u32) sGlareAnnounced, k = (u32) sFadeKeep, c = sGlareAnnouncedRgb;
+        u32 add = (((((c >> 16) & 0xFF) * a * k) / (255u * 255u)) << 16) |
+                  (((((c >> 8) & 0xFF) * a * k) / (255u * 255u)) << 8) | (((c & 0xFF) * a * k) / (255u * 255u));
+
+        gfx_set_glare((s32) ((k * (255u - a) + 127u) / 255u), add);
+    } else {
+        gfx_set_fade(sFadeKeep);
+    }
+    sGlareAnnounced = -1;
 #if DKR_GFX_PROFILE
     sScene.fadeFrames += gDcFadeOn != 0;
 #endif

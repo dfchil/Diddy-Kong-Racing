@@ -17,4 +17,14 @@
 #define PC_FADE_END_TAG 0xD0CA7F07u
 void pc_fade_announce(int alpha);
 
+// Display-list markers around the sun glare's rect (src/weather.c lensflare_render).
+// Blending colour C at alpha a over a pixel is the pixel times 1 - a, plus C * a.
+// Announced while the display list is built, the port draws everything before
+// the rect that way, the scaling with the fade's table and C * a added to each
+// vertex (in the offset colour where a texture is applied), and leaves the rect
+// out: the same picture, without a blended polygon over every pixel.
+#define PC_GLARE_BEGIN_TAG 0xD0CA7F08u
+#define PC_GLARE_END_TAG 0xD0CA7F09u
+void pc_glare_announce(int r, int g, int b, int alpha);
+
 #endif
