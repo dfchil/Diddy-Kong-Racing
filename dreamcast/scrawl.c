@@ -47,6 +47,13 @@ static uint32_t bump_light(float k1, float k2, float k3, float q) {
 }
 static int sScrawlState; // 0 not loaded, 1 ready, -1 failed
 
+/** The PVR restarted (dreamcast/gfx.c pc_fsaa_set): load the texture again when next drawn. */
+void pc_scrawl_vram_lost(void) {
+    if (sScrawlState > 0) {
+        sScrawlState = 0;
+    }
+}
+
 static int scrawl_load(void) {
     enj_texture_info_t info;
     pvr_poly_cxt_t cxt;

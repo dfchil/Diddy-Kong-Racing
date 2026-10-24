@@ -13,9 +13,9 @@
 #include <sh4zam/shz_sh4zam.h>
 #include <enDjinn/enj_font.h>
 #include <enDjinn/enj_qfont.h>
+#include <enDjinn/enj_state.h>
 #if DKR_ENJ_RENDER
 #include <enDjinn/enj_render.h>
-#include <enDjinn/enj_state.h>
 #endif
 
 // ---------------------------------------------------------------------------
@@ -28,7 +28,10 @@
 #ifndef DKR_FSAA
 #define DKR_FSAA 0
 #endif
-#define DC_RENDER_W (DC_SCREEN_W << DKR_FSAA)
+// FSAA starts as the build's DKR_FSAA and can change at a scene load
+// (pc_fsaa_set): the render width follows it.
+static DKR_HOT int sRenderW = DC_SCREEN_W << DKR_FSAA;
+#define DC_RENDER_W sRenderW
 #ifndef DKR_CUTOUT_1555
 #define DKR_CUTOUT_1555 1
 #endif
@@ -224,6 +227,46 @@ static void ta_commit(void *p) {
 
 static DKR_HOT void* pvr_ta_sq_addr;
 
+static int sWindowW = 320; // the width gfx_window_init was given, for sScaleX
+
+static void header_cache_clear(void);
+extern void pc_textures_vram_lost(void); // dreamcast/main.c
+extern void pc_scrawl_vram_lost(void);   // dreamcast/scrawl.c
+
+/**
+ * enDjinn restarted the PVR (pc_fsaa_set): every block of video memory is gone.
+ * Forget them without freeing; the texture caches reload what is drawn next.
+ */
+static void gfx_vram_lost(void *data) {
+    int i;
+
+    (void) data;
+    for (i = 0; i < MAX_TEXTURES; i++) {
+        sTextures[i].data = NULL;
+    }
+    sPendingFreeCount = 0;
+    sBoundTex = 0;
+    header_cache_clear();
+    sHdrDirty = 1;
+    sRenderW = DC_SCREEN_W * enj_video_xscale();
+    sScaleX = (float) DC_RENDER_W / (float) sWindowW;
+    *((volatile unsigned int *) DKR_PT_ALPHA_REF_ADDR) = PT_ALPHA_REF_VALUE;
+    pc_textures_vram_lost();
+    pc_scrawl_vram_lost();
+}
+
+int pc_fsaa_on(void) {
+    return enj_video_fsaa();
+}
+
+/** Switch FSAA, between scenes: enDjinn restarts the PVR and gfx_vram_lost follows. */
+void pc_fsaa_set(int on) {
+    if (sPvrReady && enj_video_fsaa() != (on ? 1 : 0)) {
+        enj_video_set_fsaa(on);
+        printf("gfx: FSAA %s, %d bytes of video memory free\n", on ? "on" : "off", (int) pvr_mem_available());
+    }
+}
+
 void gfx_window_init(int width, int height, int scale) {
     pvr_init_params_t params = {
         // OP, OP_MOD, TR, TR_MOD, PT. The PT bin has to be open for the
@@ -247,15 +290,16 @@ void gfx_window_init(int width, int height, int scale) {
         return;
     }
 
+    sWindowW = width;
     sScaleX = (float) DC_RENDER_W / (float) width;
     sScaleY = (float) DC_SCREEN_H / (float) height;
 
     // A 24-bit framebuffer instead of the default RGB565: no banding in skies,
     // fog and fades. The packed format costs 307 KB more video memory for each
     // of the two buffers than 16-bit does; RGB0888 would cost twice that.
-#if DKR_ENJ_RENDER
-    // enDjinn sets the video mode and starts the PVR (ENJ_RENDER=1); AICAflow
-    // keeps the AICA, and the port reads the controllers itself.
+    // enDjinn sets the video mode and starts the PVR, and can restart it to
+    // switch FSAA (pc_fsaa_set); AICAflow keeps the AICA, and the port reads the
+    // controllers itself unless ENJ_INPUT=1.
     {
         enj_state_t *state;
 
@@ -270,14 +314,8 @@ void gfx_window_init(int width, int height, int scale) {
         if (enj_state_startup() != 0) {
             return;
         }
+        enj_video_set_reset_callback(gfx_vram_lost, NULL);
     }
-#else
-    vid_set_mode(DM_640x480, PM_RGB888P);
-
-    if (pvr_init(&params) < 0) {
-        return;
-    }
-#endif
     printf("gfx: 24-bit framebuffer, %d bytes of video memory free\n", (int) pvr_mem_available());
 
     // Set after pvr_init so it cannot be clobbered by it.
@@ -285,13 +323,9 @@ void gfx_window_init(int width, int height, int scale) {
 
     pvr_ta_sq_addr = (void *)SQ_MASK_DEST(PVR_TA_INPUT);
 
-    // enDjinn's quick font for the frame-rate readout, in front of everything.
-    // enj_state_startup has loaded it already when enDjinn renders.
-#if DKR_ENJ_RENDER
+    // enDjinn's quick font for the frame-rate readout, in front of everything;
+    // enj_state_startup has loaded it.
     if (enj_qfont_get_header() != NULL) {
-#else
-    if (enj_qfont_init() == 0) {
-#endif
         enj_font_zvalue_set(1000.0f);
         sFpsFont = 1;
     }

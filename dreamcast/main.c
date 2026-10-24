@@ -1080,6 +1080,19 @@ static s32 bundle_claim(void *first, s32 id, s32 frames) {
  * this scene's bundle straight through and puts every texture in it into video
  * memory.
  */
+/**
+ * The PVR restarted (dreamcast/gfx.c pc_fsaa_set) and every texture in video
+ * memory is gone: forget them all. The scene's bundle loads next, and the rest
+ * load again when drawn.
+ */
+void pc_textures_vram_lost(void) {
+    sTexCacheCount = 0;
+    memset(sTexHint, 0, sizeof(sTexHint));
+    sPrebuiltCount = 0;
+    sBundleCount = 0;
+    sTexStateDirty = TRUE;
+}
+
 void pc_texture_scene_load(int level) {
     char path[96];
     u32 header[4];
