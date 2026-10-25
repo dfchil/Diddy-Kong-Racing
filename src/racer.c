@@ -33,6 +33,9 @@
 #include "tracks.h"
 #include "types.h"
 #include "vehicle_misc.h"
+#ifdef TARGET_PC
+#include "pc_swap.h"
+#endif
 
 #define MAX_NUMBER_OF_GHOST_NODES 360
 
@@ -8389,6 +8392,11 @@ s32 load_tt_ghost(s32 ghostOffset, s32 size, s16 *outTime) {
     GhostHeader *ghost = mempool_alloc_safe(size, COLOUR_TAG_RED);
     if (ghost != NULL) {
         asset_load(ASSET_TTGHOSTS, (u32) ghost, ghostOffset, size);
+#ifdef TARGET_PC
+        // Big-endian like the ROM: time and nodeCount, then the nodes, all s16.
+        // (The table that points here is swapped in timetrial_load_staff_ghost.)
+        pc_swap16_buf((u8 *) ghost + 4, (u32) size - 4);
+#endif
         if (gGhostData[GHOST_STAFF] != NULL) {
             mempool_free(gGhostData[GHOST_STAFF]);
         }
