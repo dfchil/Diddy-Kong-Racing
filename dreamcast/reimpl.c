@@ -6,6 +6,7 @@
 #include <string.h>
 #include <kos.h>
 #include <sh4zam/shz_sh4zam.h>
+#include <enDjinn/enj_vmu.h>
 
 #include "input.h"
 
@@ -703,29 +704,72 @@ void osContGetReadData(PCContPad *pads) {
 #endif
 }
 
-// EEPROM_TYPE_4K is 512 bytes / 64 eight-byte blocks. Backed by RAM, so writes
-// survive the session but not a reboot. Build with -DEEPROM_PRESET_100 to seed
-// it from a 100%-completion image instead of erased 0xFF.
+// EEPROM_TYPE_4K is 512 bytes / 64 eight-byte blocks, kept in RAM and saved to
+// the first VMU as DKR_SAVE through enDjinn's VMU saves, with the game's own
+// Diddy portrait as its icon (dreamcast/build_vmu_icon.py makes it from the
+// ROM). It is read once at boot. A write only marks it changed; enDjinn's
+// low-priority saver writes it half a second after the last change, so the
+// maple transfers never hold up the game thread. Build with -DEEPROM_PRESET_100
+// to start from a 100%-completion image when no save is found.
 #define PC_EEPROM_BLOCKS 64
 #define PC_EEPROM_BYTES (PC_EEPROM_BLOCKS * 8)
+#define VMU_SAVE_DELAY_MS 500 // after the last change, so a burst of writes saves once
 
 #ifdef EEPROM_PRESET_100
 #include "eeprom_preset.h"
 #endif
+#include "vmu_icon.h"
 
-static u8 gEeprom[PC_EEPROM_BYTES];
+static u8 gEeprom[PC_EEPROM_BYTES] __attribute__((aligned(32)));
 static s32 gEepromReady = 0;
+static enj_vmu_save_t sVmuSave = {
+    .name = "DKR_SAVE",
+    .desc_short = "DiddyKongRacing",
+    .desc_long = "Diddy Kong Racing save",
+    .app_id = "DKR",
+    .icon_palette = sDkrVmuIconPal,
+    .icon_frames = sDkrVmuIconData,
+    .icon_frame_count = 1,
+    .data = gEeprom,
+    .size = PC_EEPROM_BYTES,
+};
 
 static void eeprom_init(void) {
     if (gEepromReady) {
         return;
     }
     gEepromReady = 1;
+    enj_vmu_load_e loaded = enj_vmu_save_load(&sVmuSave);
+    switch (loaded) {
+        case ENJ_VMU_LOADED:
+            printf("VMU: save read\n");
+            break;
+        case ENJ_VMU_NO_SAVE:
+            printf("VMU: no save yet; one is written when the game first saves\n");
+            break;
+        case ENJ_VMU_NO_DEVICE:
+            printf("VMU: none plugged in; the game saves when one is\n");
+            break;
+        case ENJ_VMU_UNREADABLE:
+            printf("VMU: DKR_SAVE is not a save this game can read; starting afresh\n");
+            break;
+    }
+    if (loaded != ENJ_VMU_LOADED) {
 #ifdef EEPROM_PRESET_100
-    memcpy(gEeprom, gEepromPreset, PC_EEPROM_BYTES);
+        shz_memcpy(gEeprom, gEepromPreset, PC_EEPROM_BYTES);
 #else
-    memset(gEeprom, 0xFF, PC_EEPROM_BYTES); // erased
+        shz_memset8(gEeprom, 0xFFFFFFFFFFFFFFFFull, PC_EEPROM_BYTES); // erased
 #endif
+    }
+    enj_vmu_save_start(&sVmuSave, VMU_SAVE_DELAY_MS);
+}
+
+/**
+ * The reset button: if the save has changes, enDjinn's saver writes them and
+ * then exits, instead of the maple callback doing file I/O. Returns 1 if it will.
+ */
+s32 pc_save_exit_after_flush(void) {
+    return enj_vmu_save_exit_after_flush();
 }
 
 s32 osEepromProbe(void *mq) {
@@ -736,19 +780,24 @@ s32 osEepromProbe(void *mq) {
 s32 osEepromRead(void *mq, u8 address, u8 *buffer) {
     eeprom_init();
     if (address >= PC_EEPROM_BLOCKS) {
-        memset(buffer, 0xFF, 8);
+        shz_memset8(buffer, 0xFFFFFFFFFFFFFFFFull, 8);
         return 0;
     }
-    memcpy(buffer, &gEeprom[address * 8], 8);
+    enj_vmu_save_lock();
+    shz_memcpy(buffer, &gEeprom[address * 8], 8);
+    enj_vmu_save_unlock();
     return 0;
 }
 
 s32 osEepromWrite(void *mq, u8 address, u8 *buffer) {
     eeprom_init();
-    if (address < PC_EEPROM_BLOCKS) {
-        memcpy(&gEeprom[address * 8], buffer, 8);
+    if (address < PC_EEPROM_BLOCKS && memcmp(&gEeprom[address * 8], buffer, 8) != 0) {
+        enj_vmu_save_lock();
+        shz_memcpy(&gEeprom[address * 8], buffer, 8);
+        enj_vmu_save_unlock();
+        enj_vmu_save_changed();
     }
-    return 0; // accepted, not persisted to VMU (yet)
+    return 0;
 }
 
 s32 osPfsInit(void *mq, void *pfs, s32 channel) {

@@ -245,6 +245,12 @@ $(CHIME_STAMP): force-chime dreamcast/swirl/make_chime.py $(AICAFLOW_AUTHOR) $(A
 	$(PYTHON) dreamcast/swirl/make_chime.py $(CHIME_DIR) $(SWIRL_CHIME_MODE) \
 		"$(SWIRL_CHIME_LEFT)" "$(SWIRL_CHIME_RIGHT)" $(AICAFLOW_AUTHOR) $(AICAFLOW_PROFILER)
 # "n't" after the title beach's Nintendo logo (dreamcast/scrawl.c embeds both).
+# The VMU save's icon: Diddy's portrait from the ROM (dreamcast/build_vmu_icon.py).
+VMU_ICON := $(BUILD)/vmu_icon.h
+$(VMU_ICON): assets/.vanilla/us.v77/textures/2d/hud/diddy_icon.png dreamcast/build_vmu_icon.py
+	@mkdir -p $(dir $@)
+	$(PYTHON) dreamcast/build_vmu_icon.py $< $@
+$(BUILD)/dreamcast/reimpl.o: $(VMU_ICON)
 SCRAWL_GRID := $(BUILD)/scrawl_grid.h
 SCRAWL_TEXTURE := $(BUILD)/scrawl.dt
 # One run writes both; the normal map is the target, the grid comes with it.

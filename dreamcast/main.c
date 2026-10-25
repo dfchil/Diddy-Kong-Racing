@@ -4427,8 +4427,14 @@ void pc_enj_loop_run(void (*frame)(void *)) {
 #endif
 
 static void cont_reset_btn_callback_(uint8_t addr, uint32_t btns) {
+    extern s32 pc_save_exit_after_flush(void); // dreamcast/reimpl.c
+
     (void)addr;
     (void)btns;
+    // Unsaved changes: the VMU saver writes them and then exits.
+    if (pc_save_exit_after_flush()) {
+        return;
+    }
     arch_exit();
 }
 
