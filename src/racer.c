@@ -8480,11 +8480,20 @@ s16 timetrial_ghost_full(void) {
 s32 timetrial_ghost_read(Object *obj) {
     f32 catmullX;
     s32 temp;
+#ifdef AVOID_UB
+    // catmull_rom_interpolation reads four points, and the loop below writes four.
+    f32 vectorX[4];
+    s32 rotDiff;
+    f32 vectorY[4];
+    Object_Racer *racer;
+    f32 vectorZ[4];
+#else
     f32 vectorX[3];
     s32 rotDiff;
     f32 vectorY[3];
     Object_Racer *racer;
     f32 vectorZ[3];
+#endif
     s32 commonUnk0s32;
     s32 ghostDataIndex;
     s32 pad_sp58;
@@ -8521,7 +8530,11 @@ s32 timetrial_ghost_read(Object *obj) {
     }
     nodeIndex = commonUnk0s32 - 1;
 
+#ifdef AVOID_UB
+    for (i = 0; i < ARRAY_COUNT(vectorY); i++) {
+#else
     for (i = 0; i <= ARRAY_COUNT(vectorY); i++) {
+#endif
         curGhostNode = &gGhostData[ghostDataIndex][nodeIndex];
         if (nodeIndex == -1) {
             vectorX[i] = ((curGhostNode + 1)->x + (curGhostNode + 1)->x) - (curGhostNode + 2)->x;
