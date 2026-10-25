@@ -6797,6 +6797,12 @@ void cheatmenu_checksum(void) {
     s32 i;
     u8 *tempBuffer;
 
+#ifdef TARGET_DC
+    // There is no ROM image to sum on the Dreamcast: __ROM_END is a stand-in
+    // variable (dreamcast/reimpl.c), and its address would make the loop below
+    // copy tens of megabytes.
+    calculated = TRUE;
+#endif
     if (!calculated) {
         numBytes = 0x1000;
         size = 0x5000;
@@ -6825,7 +6831,11 @@ void cheatmenu_checksum(void) {
 
     set_render_printf_background_colour(0, 0, 0, 128);
     set_render_printf_position(32, 136);
+#ifdef TARGET_DC
+    numLeft = 0;
+#else
     numLeft = (s32) &__ROM_END;
+#endif
     render_printf("ROM checksum %08X,%d\n", cksum, numLeft);
 }
 
