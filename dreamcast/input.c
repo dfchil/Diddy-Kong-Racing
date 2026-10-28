@@ -1,6 +1,9 @@
 #include "input.h"
 
 #include <kos.h>
+#include <dc/maple/purupuru.h>
+#include <enDjinn/enj_rumble.h>
+#include <enDjinn/enj_state.h>
 
 
 #define BTN_A 0x8000
@@ -166,4 +169,100 @@ int input_host_read(int port, unsigned short *button, signed char *stickX, signe
     *stickX = (signed char) x;
     *stickY = (signed char) y;
     return 1;
+}
+
+// ---------------------------------------------------------------------------
+// Rumble. The N64 Rumble Pak has one motor, on or off; the game sets a
+// strength by switching it on for a share of the frames (src/save_data.c,
+// rumble_update). Each channel keeps which of its last eight frames had the
+// motor on, and that share becomes the Puru Puru's strength, sent only when it
+// moves by two steps or the motor starts or stops, so maple sees changes only.
+// ---------------------------------------------------------------------------
+#define RUMBLE_FREQ 26 // the Puru Puru's vibration frequency setting
+
+extern void enj_rumble_init_local_devices(void);
+extern void enj_rumble_update(void);
+
+static int sRumbleReady;
+static unsigned char sRumbleOn[4];      // the motor as the game last set it
+static unsigned char sRumbleHistory[4]; // one bit per frame, the newest lowest
+static unsigned char sRumbleSent[4];    // the strength sent last, 0 for stopped
+
+// The maple port that the game reads as `channel`, or -1.
+static int rumble_port(int channel) {
+    if (channel < 0 || channel >= 4) {
+        return -1;
+    }
+#if DKR_ENJ_INPUT
+    return channel; // enDjinn's controller states are by port
+#else
+    {
+        // The plain path reads the channel's controller by enumeration order.
+        maple_device_t *cont = maple_enum_type(channel, MAPLE_FUNC_CONTROLLER);
+
+        return cont != NULL ? cont->port : -1;
+    }
+#endif
+}
+
+static void rumble_init(void) {
+    enj_state_t *state = enj_state_get();
+
+    sRumbleReady = 1;
+    // enj_state_startup scans for packs unless told to leave input alone.
+    if (!state->flags.started || state->flags.no_input_init) {
+        enj_rumble_init_local_devices();
+    }
+}
+
+int input_rumble_present(int channel) {
+    int port;
+
+    if (!sRumbleReady) {
+        rumble_init();
+    }
+    port = rumble_port(channel);
+    return port >= 0 && enj_rumble_states_get()[port] != NULL;
+}
+
+void input_rumble_motor(int channel, int on) {
+    if (channel >= 0 && channel < 4) {
+        sRumbleOn[channel] = on != 0;
+    }
+}
+
+void input_rumble_flush(void) {
+    int i;
+
+    if (!sRumbleReady) {
+        return; // the game never looked for a pack
+    }
+    for (i = 0; i < 4; i++) {
+        int frames, strength, port;
+
+        sRumbleHistory[i] = (unsigned char) ((sRumbleHistory[i] << 1) | sRumbleOn[i]);
+        frames = __builtin_popcount(sRumbleHistory[i]);
+        // 1..8 frames on of 8 -> fpow 1..7, none -> stopped.
+        strength = frames == 0 ? 0 : 1 + ((frames - 1) * 6 + 3) / 7;
+        if (strength == sRumbleSent[i] ||
+            (strength != 0 && sRumbleSent[i] != 0 && strength - sRumbleSent[i] < 2 &&
+             sRumbleSent[i] - strength < 2)) {
+            continue;
+        }
+        port = rumble_port(i);
+        if (port < 0) {
+            continue;
+        }
+        if (strength == 0) {
+            purupuru_effect_t stop = { .motor = 1 }; // a raw 0 would not be sent
+            enj_rumble_effect_set(port, stop);
+        } else {
+            purupuru_effect_t effect = { .cont = 1, .motor = 1, .fpow = strength, .freq = RUMBLE_FREQ };
+            enj_rumble_effect_set(port, effect);
+        }
+        sRumbleSent[i] = (unsigned char) strength;
+    }
+#if !DKR_ENJ_LOOP
+    enj_rumble_update(); // enDjinn's own loop sends them otherwise
+#endif
 }

@@ -617,11 +617,9 @@ float __libm_qnan_f = __builtin_nanf("");
 // SI bus — controllers, EEPROM saves, controller paks, rumble.
 // The N64 talks to all of these through PIF-RAM DMA over the Serial Interface
 // (the libultra cont*/pfs*/eeprom*/motor files, dropped from the PC build).
-// Constructive lies instead: one controller in port 0 with neutral input, an
-// erased EEPROM (game falls back to creating default saves), and no
-// controller paks / rumble paks plugged in anywhere.
-// TODO: real host input (this is where it plugs in) and EEPROM persisted to a
-// save file on disk.
+// Here the controllers come from dreamcast/input.c, the EEPROM is kept on the
+// VMU, a Puru Puru pack stands in for the Rumble Pak, and there are no
+// controller paks.
 // ---------------------------------------------------------------------------
 #define PC_CONT_TYPE_NORMAL 0x0005
 #define PC_CONT_NO_RESPONSE 0x8
@@ -676,6 +674,8 @@ s32 osContInit(void *mq, u8 *bitpattern, PCContStatus *status) {
 }
 
 s32 osContStartReadData(void *mq) {
+    // The game calls this right after rumble_update: the frame's motor states are in.
+    input_rumble_flush();
     // Poll "completes" instantly: post the done-message the game waits for.
     osSendMesg(mq, NULL, 0 /* OS_MESG_NOBLOCK */);
     return 0;
@@ -800,12 +800,22 @@ s32 osEepromWrite(void *mq, u8 address, u8 *buffer) {
     return 0;
 }
 
+// A Rumble Pak answers the file system's init with PFS_ERR_ID_FATAL, which is
+// how the game tells one at boot (src/save_data.c).
+#define PC_PFS_ERR_ID_FATAL 10
+
 s32 osPfsInit(void *mq, void *pfs, s32 channel) {
-    return PC_PFS_ERR_NOPACK;
+    return input_rumble_present(channel) ? PC_PFS_ERR_ID_FATAL : PC_PFS_ERR_NOPACK;
 }
 
+// Only rumble packs are reported plugged in; there are no controller paks.
 s32 osPfsIsPlug(void *mq, u8 *pattern) {
+    s32 i;
+
     *pattern = 0;
+    for (i = 0; i < PC_MAXCONTROLLERS; i++) {
+        *pattern |= input_rumble_present(i) ? (1 << i) : 0;
+    }
     return 0;
 }
 
@@ -845,15 +855,26 @@ s32 osPfsAllocateFile(void *pfs, u16 companyCode, u32 gameCode, u8 *gameName, u8
     return PC_PFS_ERR_NOPACK;
 }
 
+// The head of libultra's OSPfs, up to the channel the motor calls need.
+typedef struct {
+    int status;
+    void *queue;
+    int channel;
+} PCPfsHead;
+
+// The Rumble Pak is a Puru Puru pack in the same controller (dreamcast/input.c).
 s32 osMotorInit(void *mq, void *pfs, s32 channel) {
-    return PC_PFS_ERR_NOPACK; // no rumble pak
+    ((PCPfsHead *) pfs)->channel = channel;
+    return input_rumble_present(channel) ? 0 : PC_PFS_ERR_NOPACK;
 }
 
 s32 osMotorStart(void *pfs) {
+    input_rumble_motor(((PCPfsHead *) pfs)->channel, 1);
     return 0;
 }
 
 s32 osMotorStop(void *pfs) {
+    input_rumble_motor(((PCPfsHead *) pfs)->channel, 0);
     return 0;
 }
 
