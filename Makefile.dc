@@ -65,8 +65,9 @@ FRAME_FIELDS ?= 2
 FSAA ?= 0
 # With FSAA=1: the maps drawn without it (comma-separated level ids), switched
 # at their scene load. Measured: Whale Bay 8, Boulder Canyon 19 and Frosty
-# Village 28 had most of the late frames with FSAA.
-FSAA_OFF_MAPS ?= 8,19,28
+# Village 28 had most of the late frames with FSAA, and Walrus Cove 6 had 27
+# in its 25 s demo with FSAA and 3 without.
+FSAA_OFF_MAPS ?= 8,19,28,6
 # 1 adds controls to hold a frame and switch cutout modes; see dreamcast/main.c.
 # Measurement only: start the attract loop at this level's demo, and leave out the water.
 DEMO_LEVEL ?= -1
