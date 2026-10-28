@@ -35,6 +35,9 @@ PROF_SAMPLE_MAP ?= -1
 SHOW_FPS ?= 1
 # 1: the attract loop shows the title sequence once, then only the demo races, in a loop.
 DEMO_RACES_ONLY ?= 0
+# 1: the attract loop plays every race track, battle arena, hub and boss for
+# 25 s each with computer racers, after the title sequence (about 23 minutes).
+LEVEL_TOUR ?= 0
 # 1: the boot screen's swirl is the orange of the Dreamcast's own boot screen,
 # #FF5C00, instead of the European blue.
 SWIRL_ORANGE ?= 0

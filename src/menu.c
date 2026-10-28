@@ -3354,9 +3354,47 @@ void func_80083098(f32 updateRateF) {
  * Load the title textures and reset player allocation.
  * Set the current level and demo.
  */
-#if defined(DKR_DEMO_RACES_ONLY) && DKR_DEMO_RACES_ONLY
+#if defined(DKR_LEVEL_TOUR) && DKR_LEVEL_TOUR
 /**
- * DEMO_RACES_ONLY: the demo after the one at `index`, wrapping round, passing
+ * LEVEL_TOUR: the attract loop plays every level instead of the ROM's demos,
+ * each for the demos' 25 s with only computer racers, to measure the whole
+ * game's frame times in one run. Same layout as the ROM's table.
+ */
+#define TOUR_LEVEL(id) id, -2, 100
+static s8 sLevelTourIds[] = {
+    ASSET_LEVEL_TITLESCREENSEQUENCE, 0, 0,
+    // Dino Domain, Sherbet Island, Snowflake Mountain, Dragon Forest, Future Fun Land
+    TOUR_LEVEL(ASSET_LEVEL_ANCIENTLAKE), TOUR_LEVEL(ASSET_LEVEL_FOSSILCANYON),
+    TOUR_LEVEL(ASSET_LEVEL_JUNGLEFALLS), TOUR_LEVEL(ASSET_LEVEL_HOTTOPVOLCANO),
+    TOUR_LEVEL(ASSET_LEVEL_WHALEBAY), TOUR_LEVEL(ASSET_LEVEL_PIRATELAGOON),
+    TOUR_LEVEL(ASSET_LEVEL_CRESCENTISLAND), TOUR_LEVEL(ASSET_LEVEL_TREASURECAVES),
+    TOUR_LEVEL(ASSET_LEVEL_EVERFROSTPEAK), TOUR_LEVEL(ASSET_LEVEL_WALRUSCOVE),
+    TOUR_LEVEL(ASSET_LEVEL_SNOWBALLVALLEY), TOUR_LEVEL(ASSET_LEVEL_FROSTYVILLAGE),
+    TOUR_LEVEL(ASSET_LEVEL_BOULDERCANYON), TOUR_LEVEL(ASSET_LEVEL_GREENWOODVILLAGE),
+    TOUR_LEVEL(ASSET_LEVEL_WINDMILLPLAINS), TOUR_LEVEL(ASSET_LEVEL_HAUNTEDWOODS),
+    TOUR_LEVEL(ASSET_LEVEL_SPACEDUSTALLEY), TOUR_LEVEL(ASSET_LEVEL_DARKMOONCAVERNS),
+    TOUR_LEVEL(ASSET_LEVEL_SPACEPORTALPHA), TOUR_LEVEL(ASSET_LEVEL_STARCITY),
+    // Battle arenas
+    TOUR_LEVEL(ASSET_LEVEL_FIREMOUNTAIN), TOUR_LEVEL(ASSET_LEVEL_ICICLEPYRAMID),
+    TOUR_LEVEL(ASSET_LEVEL_DARKWATERBEACH), TOUR_LEVEL(ASSET_LEVEL_SMOKEYCASTLE),
+    // Hubs
+    TOUR_LEVEL(ASSET_LEVEL_CENTRALAREAHUB), TOUR_LEVEL(ASSET_LEVEL_DINODOMAINHUB),
+    TOUR_LEVEL(ASSET_LEVEL_SHERBETISLANDHUB), TOUR_LEVEL(ASSET_LEVEL_SNOWFLAKEMOUNTAINHUB),
+    TOUR_LEVEL(ASSET_LEVEL_DRAGONFORESTHUB), TOUR_LEVEL(ASSET_LEVEL_FUTUREFUNLANDHUB),
+    // Bosses
+    TOUR_LEVEL(ASSET_LEVEL_TRICKYTOPS1), TOUR_LEVEL(ASSET_LEVEL_BLUEY1),
+    TOUR_LEVEL(ASSET_LEVEL_BUBBLER1), TOUR_LEVEL(ASSET_LEVEL_SMOKEY1),
+    TOUR_LEVEL(ASSET_LEVEL_WIZPIG1), TOUR_LEVEL(ASSET_LEVEL_TRICKYTOPS2),
+    TOUR_LEVEL(ASSET_LEVEL_BLUEY2), TOUR_LEVEL(ASSET_LEVEL_BUBBLER2),
+    TOUR_LEVEL(ASSET_LEVEL_SMOKEY2), TOUR_LEVEL(ASSET_LEVEL_WIZPIG2),
+    -1,
+};
+#undef TOUR_LEVEL
+#endif
+
+#if (defined(DKR_DEMO_RACES_ONLY) && DKR_DEMO_RACES_ONLY) || (defined(DKR_LEVEL_TOUR) && DKR_LEVEL_TOUR)
+/**
+ * DEMO_RACES_ONLY or LEVEL_TOUR: the demo after the one at `index`, wrapping round, passing
  * over the title sequence, so after its first showing only the races play.
  */
 static s32 title_demo_after(s32 index) {
@@ -3383,7 +3421,7 @@ void menu_prefetch_next_title_demo_music(void) {
     s32 count;
 
     if (!sTitleScreenDemoIds) return;
-#if defined(DKR_DEMO_RACES_ONLY) && DKR_DEMO_RACES_ONLY
+#if (defined(DKR_DEMO_RACES_ONLY) && DKR_DEMO_RACES_ONLY) || (defined(DKR_LEVEL_TOUR) && DKR_LEVEL_TOUR)
     index = title_demo_after(gTitleDemoIndex);
     demo = &sTitleScreenDemoIds[index];
 #else
@@ -3443,6 +3481,9 @@ void menu_title_screen_init(void) {
     set_time_trial_enabled(FALSE);
     gTitleDemoIndex = 0;
     sTitleScreenDemoIds = (s8 *) get_misc_asset(ASSET_MISC_TITLE_SCREEN_DEMO_IDS);
+#if defined(DKR_LEVEL_TOUR) && DKR_LEVEL_TOUR
+    sTitleScreenDemoIds = sLevelTourIds;
+#endif
 #if defined(DKR_DEMO_LEVEL) && DKR_DEMO_LEVEL >= 0
     // Measurement builds (DEMO_LEVEL=n): start the attract loop at that level's
     // demo instead of waiting minutes for it to come round.
@@ -3567,7 +3608,7 @@ s32 menu_title_screen_loop(s32 updateRate) {
     }
     if (gMenuDelay == 0 && (func_800214C4() || sp28)) {
         if (gTitleDemoTimer) {} // Fakematch
-#if defined(DKR_DEMO_RACES_ONLY) && DKR_DEMO_RACES_ONLY
+#if (defined(DKR_DEMO_RACES_ONLY) && DKR_DEMO_RACES_ONLY) || (defined(DKR_LEVEL_TOUR) && DKR_LEVEL_TOUR)
         gTitleDemoIndex = title_demo_after(gTitleDemoIndex);
         demo = &sTitleScreenDemoIds[gTitleDemoIndex];
 #else
