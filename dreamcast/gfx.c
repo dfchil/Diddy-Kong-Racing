@@ -100,6 +100,7 @@ static DKR_HOT int sDepthWrite = 1;
 static DKR_HOT int sDepthOffset;   // decal bias
 static DKR_HOT float sAlphaRef;    // > 0 routes the batch to the punch-through list
 static DKR_HOT int sBlend = 1;     // the RDP render mode blends (FORCE_BL): translucent
+static DKR_HOT int sFog;           // G_FOG: the PVR's table fog, by depth, per pixel
 
 // Scissor, in N64 pixels (top-left origin). Full screen by default.
 static DKR_HOT int sScisEnable;
@@ -642,10 +643,95 @@ void gfx_set_texenv_modulate(void) {
 // Render-mode state
 // ---------------------------------------------------------------------------
 
-// No fog in the first pass — accepted as a cosmetic gap.
+// Fog is the PVR's fog table: the hardware looks each pixel's 1/w up in it, so
+// fog costs nothing per vertex. The RDP fades by a factor the RSP computes per
+// vertex; the table holds the same factor as a function of depth, sampled at 129
+// points and interpolated between them, so it differs from the N64 only in being
+// per pixel. The table and its colour are registers, one for the whole frame:
+// the players of a split screen share the level's fog, unless a fog changer or a
+// boss moves one of them, and then the last one set wins.
+static unsigned int sFogRgb;    // the fog colour, 0xRRGGBB
+static float sFogC0, sFogC1;    // the RSP's fog factor, 0..255, is c0 + c1 / w
+static float sFogMaxW;          // w at the far plane
+static float sFogLinearNear, sFogLinearFar; // gfx_fog_linear's, this frame; far 0 = none
+static unsigned int sFogLinearRgb;
+static int sFogLinearHeld; // frames the game's fog stays off for it: the table is shared
+static unsigned int sFogTableRgb = 0xFFFFFFFFu; // what the registers hold
+static float sFogTableC0, sFogTableC1, sFogTableNear, sFogTableFar;
+
 void gfx_set_fog(int enable, const unsigned char color[4]) {
-    (void) enable;
-    (void) color;
+    enable = enable != 0 && sFogLinearHeld == 0;
+    if (enable != sFog) {
+        sFog = enable;
+        sHdrDirty = 1;
+    }
+    if (enable) {
+        sFogRgb = ((unsigned int) color[0] << 16) | ((unsigned int) color[1] << 8) | (unsigned int) color[2];
+    }
+}
+
+void gfx_fog_linear(unsigned int rgb, float nearW, float farW) {
+    sFogLinearRgb = rgb & 0x00FFFFFFu;
+    sFogLinearHeld = 2; // this frame and the next, which may draw before the native draw asks again
+    sFogLinearNear = nearW;
+    sFogLinearFar = farW;
+}
+
+void gfx_set_fog_depth(float c0, float c1, float maxW) {
+    sFogC0 = c0;
+    sFogC1 = c1;
+    sFogMaxW = maxW;
+}
+
+/**
+ * The frame's fog into the registers, before the scene is rendered; only when it
+ * changed, since the table is 128 register writes. Register k interpolates
+ * between samples k and k + 1, and sample k + 1 lies at 1/w = x / far, where
+ * x = 2^(k / 16) * (1 + (k % 16 + 1) / 16): 8 octaves of depth, nearer as k
+ * grows. Sample 0, x = 1, is the farthest, and anything beyond it is looked up
+ * there; the table starts where the fog becomes full, or at the far plane.
+ */
+static void fog_registers_set(void) {
+    int linear = sFogLinearFar > sFogLinearNear;
+    unsigned int rgb = gfx_fade_argb(linear ? sFogLinearRgb : sFogRgb) & 0x00FFFFFFu;
+    float c0 = linear ? 0.0f : sFogC0, c1 = linear ? 0.0f : sFogC1;
+    float near = linear ? sFogLinearNear : 0.0f;
+    float far = linear ? sFogLinearFar : sFogMaxW;
+    float table[129];
+    int k;
+
+    sFogLinearFar = 0.0f; // gfx_fog_linear holds for one frame
+    if (sFogLinearHeld > 0) {
+        sFogLinearHeld--;
+    }
+    if (rgb == sFogTableRgb && c0 == sFogTableC0 && c1 == sFogTableC1 && near == sFogTableNear &&
+        far == sFogTableFar) {
+        return;
+    }
+    sFogTableRgb = rgb;
+    sFogTableC0 = c0;
+    sFogTableC1 = c1;
+    sFogTableNear = near;
+    sFogTableFar = far;
+    // KOS scales the table by the table colour's alpha, so the colour goes first.
+    pvr_fog_table_color(1.0f, (float) (rgb >> 16) * (1.0f / 255.0f), (float) ((rgb >> 8) & 0xFF) * (1.0f / 255.0f),
+                        (float) (rgb & 0xFF) * (1.0f / 255.0f));
+    if (!linear && c1 < 0.0f && c0 > 255.0f) {
+        float full = c1 / (255.0f - c0); // the w at which the factor reaches 255
+
+        if (full < far) {
+            far = full;
+        }
+    }
+    pvr_fog_far_depth(far);
+    for (k = 0; k < 129; k++) {
+        // Sample 0 at x = 1; sample k + 1 where register k looks up.
+        float x = k == 0 ? 1.0f : (float) (1 << ((k - 1) >> 4)) * (1.0f + (float) (((k - 1) & 15) + 1) * (1.0f / 16.0f));
+        float w = far / x;
+
+        table[k] = linear ? (w - near) / (far - near) : (c0 + c1 / w) * (1.0f / 255.0f);
+    }
+    pvr_fog_table_custom(table); // clamps to 0..1
 }
 
 void gfx_set_depth_test(int enable) {
@@ -943,7 +1029,7 @@ static DKR_HOT_CODE_SPARE void compile_header_for(int list, pvr_poly_hdr_t *out)
     unsigned int key = 0x80000000u | ((unsigned int) list << 20) | ((unsigned int) sBoundTex << 6) |
                        ((sFilterPoint != 0) << 5) | ((sScisEnable != 0) << 4) | ((sDepthTest != 0) << 3) |
                        ((sFarBackdrop != 0) << 2) | ((sAlphaRef > 0.0f) << 1) | (sDepthWrite != 0) |
-                       ((unsigned int) (sCoverDraw != 0) << 30);
+                       ((unsigned int) (sFog != 0) << 29) | ((unsigned int) (sCoverDraw != 0) << 30);
     unsigned int at = (key ^ (key >> 6) ^ (key >> 13)) & (HDR_CACHE - 1);
 
     if (sHdrCache[at].key != key) {
@@ -980,6 +1066,7 @@ static __attribute__((noinline, cold)) void compile_header_uncached(int list, pv
     // the texenv-blend path (oargb, post-modulate). Non-blend draws set oargb = 0,
     // so the add is a no-op.
     cxt.gen.specular = PVR_SPECULAR_ENABLE;
+    cxt.gen.fog_type = sFog ? PVR_FOG_TABLE : PVR_FOG_DISABLE;
     cxt.depth.comparison = sDepthTest ? PVR_DEPTHCMP_GEQUAL : PVR_DEPTHCMP_ALWAYS;
     if (list == PVR_LIST_TR_POLY && sFarBackdrop) {
         cxt.depth.comparison = PVR_DEPTHCMP_GEQUAL; // only where the scene left the background
@@ -2032,6 +2119,7 @@ void gfx_frame_end(void) {
     replay_list(PVR_LIST_PT_POLY, sPtBuf, sProfSkip == 1 ? 0 : sPtCount, DKR_SHOW_FPS && sFpsFont ? fps_draw : NULL);
     replay_list(PVR_LIST_TR_POLY, sTrBuf, sProfSkip == 2 ? 0 : sTrCount, NULL);
 
+    fog_registers_set();
     pvr_scene_finish();
     frame_done();
 }
@@ -2048,6 +2136,7 @@ static void frame_op(void *data) {
     (void) data;
     frame_state_reset();
     sFrameWalk(sFrameWalkData);
+    fog_registers_set(); // the walk has set the frame's fog
 }
 
 static void frame_tr(void *data) {

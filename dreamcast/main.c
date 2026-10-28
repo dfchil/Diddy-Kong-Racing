@@ -859,6 +859,23 @@ static DKR_HOT u8 sFogColor[4] = { 0x00, 0x00, 0x00, 0xFF };
 static DKR_HOT s16 sFogMul = 0;
 static DKR_HOT s16 sFogOfs = 0;
 
+/**
+ * The fog factor as a function of depth, for the PVR's fog table. The RSP's
+ * factor is ndc_z * mul + ofs, and under the game's one perspective matrix
+ * (row vectors) ndc_z = clip.z / w is a + b / w, with w = m23 * z + m33 and
+ * clip.z = m22 * z + m32 for eye-space z: a = m22 / m23, b = m32 - m22 * m33 / m23.
+ * The far plane is where ndc_z is 1, at w = b / (1 - a).
+ */
+extern MtxF gPerspectiveMatrixF; // src/camera.c
+
+static void fog_depth_set(void) {
+    const MtxF *m = &gPerspectiveMatrixF;
+    f32 a = (*m)[2][2] / (*m)[2][3];
+    f32 b = (*m)[3][2] - (a * (*m)[3][3]);
+
+    gfx_set_fog_depth((a * (f32) sFogMul) + (f32) sFogOfs, b * (f32) sFogMul, b / (1.0f - a));
+}
+
 #define GFX_MAX_TEXTURES 1024
 #define GFX_MAX_TEX_TEXELS (256 * 256)
 
@@ -3629,6 +3646,7 @@ static DKR_HOT_CODE void run_dl(const Gfx *dl, s32 count, s32 depth) {
                     // offset in the low half; both are signed.
                     sFogMul = (s16) (w1 >> 16);
                     sFogOfs = (s16) (w1 & 0xFFFF);
+                    fog_depth_set();
                 }
                 break;
             }

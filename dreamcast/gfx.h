@@ -90,6 +90,16 @@ void gfx_set_texture_filter(int point);
 // layer and any material without G_FOG.
 void gfx_set_fog(int enable, const unsigned char color[4]);
 
+// Where the fog lies: the RSP's fog factor, 0..255, is c0 + c1 / w for a vertex
+// at clip-space w, and maxW is w at the far plane. It becomes the PVR's fog
+// table, so fog costs no CPU per vertex.
+void gfx_set_fog_depth(float c0, float c1, float maxW);
+
+// For a native draw that wants fog of its own (dreamcast/swirl.c): this frame's
+// fog is rgb, none at nearW and full at farW, linear in w, instead of the game's.
+// Its headers ask for PVR_FOG_TABLE themselves; the game's own fog is off meanwhile.
+void gfx_fog_linear(unsigned int rgb, float nearW, float farW);
+
 // Texel/vertex-colour combine. `modulate` is texel * colour (3D geometry).
 // `blend` lerps from vertex colour to `color` by the texel: a combiner blending
 // a texture towards a constant, e.g. the menu's flashing text highlight.
